@@ -1,0 +1,65 @@
+{
+  "name": "Trident Trackball",
+  "vendorProductId": 1720223846,
+  "macros": [
+    "{KC_LCTL,KC_LEFT}",
+    "{KC_LCTL,KC_RGHT}",
+    "{KC_LGUI,KC_R}",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+  ],
+  "layers": [
+    [
+      "LT(1,KC_MS_BTN4)",
+      "LT(2,KC_MS_BTN5)",
+      "KC_MS_BTN6",
+      "KC_MS_BTN7",
+      "0x5700",
+      "KC_MS_BTN3",
+      "KC_MS_BTN2",
+      "KC_MS_BTN1"
+    ],
+    [
+      "KC_TRNS",
+      "MACRO(0)",
+      "MACRO(1)",
+      "MACRO(2)",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS"
+    ],
+    [
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS"
+    ],
+    [
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS",
+      "KC_TRNS"
+    ]
+  ],
+  "encoders": []
+}
