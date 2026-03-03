@@ -1,0 +1,53 @@
+{
+    "keyboard_name": "Trident Trackball",
+    "maintainer": "junytang",
+    "manufacturer": "junytang",
+    "processor": "RP2040",
+    "bootloader": "rp2040",
+    "modules": [
+        "plodah/mouse_jiggler",
+        "plodah/task_switch"
+    ],
+    "features": {
+        "bootmagic": true,
+        "command": false,
+        "console": false,
+        "extrakey": true,
+        "mousekey": true,
+        "nkro": false,
+        "backlight": false,
+        "combo": true,
+        "deferred_exec": true,
+        "encoder_map": false,
+        "rgblight": false,
+        "rgb_matrix": false,
+        "tap_dance": true
+    },
+    "usb": {
+        "vid": "0x6688",
+        "pid": "0x8866",
+        "max_power": 100,
+        "device_version": "1.0.0"
+    },
+    "matrix_pins": {
+        "direct": [
+            ["GP28", "GP29", "GP1", "GP0"],  
+            ["GP27",  "GP26", "GP3", "GP2"]
+        ]
+    },
+    "diode_direction": "COL2ROW",
+    "layouts": {
+        "LAYOUT": {
+            "layout": [
+                {"matrix": [0, 0], "label":"Top Left Left", "x":0, "y":0, "h":2},
+                {"matrix": [0, 1], "label":"Top Left", "x":1.25, "y":0, "h":1.25},
+                {"matrix": [0, 2], "label":"Top Right", "x":3.75, "y":0, "h":2},
+                {"matrix": [0, 3], "label":"Top Right Right", "x":3.75, "y":0, "h":2},
+                {"matrix": [1, 0], "label":"Bottom Left Left", "x":0, "y":2.25, "w":1.75, "h":2},
+                {"matrix": [1, 1], "label":"Bottom Left", "x":2.5, "y":0, "h":1.25},
+                {"matrix": [1, 2], "label":"Bottom Right", "x":3, "y":2.25, "w":1.75, "h":2},
+                {"matrix": [1, 3], "label":"Bottom Right Right", "x":3, "y":2.25, "w":1.75, "h":2}
+            ]
+        }
+    }
+}
