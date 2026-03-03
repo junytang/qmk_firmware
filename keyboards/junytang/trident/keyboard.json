@@ -5,8 +5,13 @@
     "processor": "RP2040",
     "bootloader": "rp2040",
     "modules": [
+        "drashna/pointing_device_accel",
+        "plodah/dragscroll_straighten",
+        "plodah/morse_code",
         "plodah/mouse_jiggler",
-        "plodah/task_switch"
+        "plodah/pmw_rotation",
+        "plodah/task_switch",
+        "plodah/turbo_fire"
     ],
     "features": {
         "bootmagic": true,

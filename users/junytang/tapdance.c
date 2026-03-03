@@ -1,5 +1,4 @@
 #if defined(TAP_DANCE_ENABLE)
-  #pragma once
 
   #if defined(BETTER_DRAGSCROLL_TAPDANCE)
     #include "better_dragscroll.h"
@@ -45,10 +44,10 @@
         else return TRIPLE_HOLD;
       }
       else return 8; //magic number. At some point this method will expand to work for more presses
-    }   
+    }
 
     void dragscrolltd_fin(tap_dance_state_t *state, void *user_data){
-      dprintf("fin; pressed:%d $dcount:%d \n", state->pressed, state->count);
+      dprintf("fin; pressed:%d count:%d \n", state->pressed, state->count);
       tap_state.state = cur_dance(state);
       switch (tap_state.state) {
         case SINGLE_TAP: better_dragscroll_toggle(true); break;
