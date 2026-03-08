@@ -3,15 +3,19 @@
     #define VIA_DPI_STORE_RATIO 100
     #include "ploopy_via.h"
 
+    // 确保结构体大小不会超过预留的用户数据区域
+    // 如果报错，说明你需要增加 config.h 中的 EECONFIG_USER_DATA_SIZE
+    _Static_assert(sizeof(ploopyvia_config) <= EECONFIG_USER_DATA_SIZE, "ploopyvia_config size exceeds EECONFIG_USER_DATA_SIZE!");
+
     #define COMBINE_UINT8(a, b) ((a << 8) | b)
     void ploopyvia_config_load(void) {
         // ploopyvia_config.raw = eeconfig_read_user();
-        eeconfig_read_user_datablock(&ploopyvia_config, 0, EECONFIG_USER_DATA_SIZE);
+        eeconfig_read_user_datablock(&ploopyvia_config, 0, sizeof(ploopyvia_config));
     }
 
     void ploopyvia_config_save(void) {
         // eeconfig_update_user(ploopyvia_config.raw);
-        eeconfig_update_user_datablock(&ploopyvia_config, 0, EECONFIG_USER_DATA_SIZE);
+        eeconfig_update_user_datablock(&ploopyvia_config, 0, sizeof(ploopyvia_config));
     }
 
     void update_dpi(void) {
