@@ -174,17 +174,17 @@ const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
 /* Keymap. */
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     // Base layer with all of the mouse-related stuff for everyday use.
-    [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN4, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN2,
-                                        MS_BTN1, MS_BTN3,
-                                        PKC_GESTURE, TG(LAYER_CONTROL) ),
+    [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN4, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN3,
+                                        MS_BTN1, MS_BTN2,
+                                        PKC_GESTURE, MO(LAYER_CONTROL) ),
     // Mirror-image of right-handed layout for lefties.
-    [LAYER_NAV_LEFT_HANDED] = LAYOUT(   MS_BTN2, PKC_DRAG_SCROLL, MS_BTN4, MS_BTN5,
-                                        MS_BTN3, MS_BTN1,
-                                        TG(LAYER_CONTROL), PKC_GESTURE ),
+    [LAYER_NAV_LEFT_HANDED] = LAYOUT(   MS_BTN3, PKC_DRAG_SCROLL, MS_BTN4, MS_BTN5,
+                                        MS_BTN2, MS_BTN1,
+                                        MO(LAYER_CONTROL), PKC_GESTURE ),
     // Layer for all of the customization options.
     [LAYER_CONTROL] = LAYOUT(           PKC_BLINKY_DPI_CONFIG, PKC_ADJUST_LED_BRIGHTNESS, PKC_TGL_VERT_SCRL, PKC_TGL_HORIZ_SCRL,
                                         PKC_TGL_MIRROR, PKC_TGL_DRAG_SCRL,
-                                        TG(LAYER_CONTROL), TG(LAYER_CONTROL) ),
+                                        MO(LAYER_CONTROL), MO(LAYER_CONTROL) ),
     [3] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
     [4] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
     [5] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
@@ -641,45 +641,45 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
             if( user_config.left_handed ) {
                 if( leftwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
                     if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = 1;
+                        mouse_report.h = -1;
                     }
                     leftwheel_lowres_scroll_tick = 0;
                 }
                 else if( leftwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
                     if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = -1;
+                        mouse_report.h = 1;
                     }
                     leftwheel_lowres_scroll_tick = 0;
                 }
 
                 if( rightwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = -1;
+                    mouse_report.v = 1;
                     rightwheel_lowres_scroll_tick = 0;
                 }
                 else if( rightwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = 1;
+                    mouse_report.v = -1;
                     rightwheel_lowres_scroll_tick = 0;
                 }
             }
             else {
                 if( leftwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = -1;
+                    mouse_report.v = 1;
                     leftwheel_lowres_scroll_tick = 0;
                 }
                 else if( leftwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = 1;
+                    mouse_report.v = -1;
                     leftwheel_lowres_scroll_tick = 0;
                 }
 
                 if( rightwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
                     if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = 1;
+                        mouse_report.h = -1;
                     }
                     rightwheel_lowres_scroll_tick = 0;
                 }
                 else if( rightwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
                     if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = -1;
+                        mouse_report.h = 1;
                     }
                     rightwheel_lowres_scroll_tick = 0;
                 }
