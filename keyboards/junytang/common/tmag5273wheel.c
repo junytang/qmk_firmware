@@ -46,7 +46,7 @@ void tmag5273_init_device(uint8_t device_addr) {
 
     // Give found device a new device address
     uint8_t i2c_address = device_addr | 0x1;
-    i2c_write_register(addr, REG_I2C_ADDRESS, &i2c_address, 1, 100);
+    i2c_write_register(addr, REG_I2C_ADDRESS, &i2c_address, 1, 20);
 
     // 32x oversampling
     uint8_t device_config_1 = 0b101 << 2;
@@ -64,16 +64,16 @@ void tmag5273_init_device(uint8_t device_addr) {
 
     uint8_t int_config = 0x1;
 
-    i2c_write_register(device_addr, REG_DEVICE_CONFIG_1, &device_config_1, 1, 100);
-    i2c_write_register(device_addr, REG_DEVICE_CONFIG_2, &device_config_2, 1, 100);
-    i2c_write_register(device_addr, REG_SENSOR_CONFIG_1, &sensor_config_1, 1, 100);
-    i2c_write_register(device_addr, REG_SENSOR_CONFIG_2, &sensor_config_2, 1, 100);
+    i2c_write_register(device_addr, REG_DEVICE_CONFIG_1, &device_config_1, 1, 20);
+    i2c_write_register(device_addr, REG_DEVICE_CONFIG_2, &device_config_2, 1, 20);
+    i2c_write_register(device_addr, REG_SENSOR_CONFIG_1, &sensor_config_1, 1, 20);
+    i2c_write_register(device_addr, REG_SENSOR_CONFIG_2, &sensor_config_2, 1, 20);
     i2c_write_register(device_addr, REG_INT_CONFIG_1, &int_config, 1, 100);
 }
 
 uint16_t tmag5273_get_angle(uint8_t device_addr) {
     uint8_t data[2];
-    i2c_read_register(device_addr, REG_ANGLE_RESULT_MSB, data, 2, 100);
+    i2c_read_register(device_addr, REG_ANGLE_RESULT_MSB, data, 2, 20);
     uint16_t rawangle = (data[0] << 8) | data[1];
     //printf("Angle: %d\n", rawangle);
     return rawangle;
@@ -83,7 +83,7 @@ uint16_t tmag5273_get_angle(uint8_t device_addr) {
    size of the wheel. Positive values are clockwise distances, negative values CCW. */
 int16_t calculate_wheel_delta( uint16_t wheel_newangle, uint16_t wheel_oldangle ) {
     int16_t wheel_delta = (int16_t)(wheel_newangle - wheel_oldangle);
-    
+
     if (wheel_delta > (TMAG5273_MAX_SENSOR_VALUE / 2)) {
         wheel_delta -= TMAG5273_MAX_SENSOR_VALUE;
     } else if (wheel_delta < -(TMAG5273_MAX_SENSOR_VALUE / 2)) {
@@ -93,23 +93,23 @@ int16_t calculate_wheel_delta( uint16_t wheel_newangle, uint16_t wheel_oldangle 
     return wheel_delta;
 }
 
-/* Returns the angular distance bewteen wheel_rawangle and _wheel_deadzone_center. Also updates 
+/* Returns the angular distance bewteen wheel_rawangle and _wheel_deadzone_center. Also updates
    wheel_deadzone_center whenever there's a reason to move the deadzone. */
 int16_t calculate_deadzone_distance( uint16_t wheel_rawangle, uint16_t* wheel_deadzone_center ) {
-    uint16_t wheel_deadzone_lower = ( wheel_rawangle - 
-                                          TMAG5273_WHEEL_DEADZONE + 
-                                          TMAG5273_MAX_SENSOR_VALUE) 
+    uint16_t wheel_deadzone_lower = ( wheel_rawangle -
+                                          TMAG5273_WHEEL_DEADZONE +
+                                          TMAG5273_MAX_SENSOR_VALUE)
                                         % TMAG5273_MAX_SENSOR_VALUE;
-    uint16_t wheel_deadzone_upper = ( wheel_rawangle + 
-                                          TMAG5273_WHEEL_DEADZONE + 
-                                          TMAG5273_MAX_SENSOR_VALUE) 
+    uint16_t wheel_deadzone_upper = ( wheel_rawangle +
+                                          TMAG5273_WHEEL_DEADZONE +
+                                          TMAG5273_MAX_SENSOR_VALUE)
                                         % TMAG5273_MAX_SENSOR_VALUE;
 
-    int16_t wheel_deadzone_distance = ( wheel_rawangle - 
+    int16_t wheel_deadzone_distance = ( wheel_rawangle -
                                   *wheel_deadzone_center +
                                   TMAG5273_MAX_SENSOR_VALUE)
                                 % TMAG5273_MAX_SENSOR_VALUE;
-        
+
     if (wheel_deadzone_distance > (TMAG5273_MAX_SENSOR_VALUE / 2)) {
         wheel_deadzone_distance -= TMAG5273_MAX_SENSOR_VALUE;
     } else if (wheel_deadzone_distance < -(TMAG5273_MAX_SENSOR_VALUE / 2)) {

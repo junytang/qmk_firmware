@@ -40,8 +40,8 @@
 #define POINTING_DEVICE_ACCEL_LIMIT 0.2        // lower limit of accel curve (minimum acceleration factor)
 
 #define PLOOPY_DRAGSCROLL_MOMENTARY
-#define PLOOPY_DRAGSCROLL_DIVISOR_H 1.0
-#define PLOOPY_DRAGSCROLL_DIVISOR_V 0.3
+#define PLOOPY_DRAGSCROLL_DIVISOR_H 32
+#define PLOOPY_DRAGSCROLL_DIVISOR_V 32
 #define PLOOPY_DRAGSCROLL_INVERT
 
 /* PMW3360 Settings */
@@ -61,6 +61,9 @@
 // #define I2C1_SCL_PIN GP13
 #define I2C1_SDA_PIN GP6
 #define I2C1_SCL_PIN GP7
+
+/* Increase I2C speed to 400 KHz */
+#define F_SCL 400000L
 
 // #define TMAG5273_D0_PWR_PIN GP27
 // #define TMAG5273_D1_PWR_PIN GP14
