@@ -174,13 +174,13 @@ const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
 /* Keymap. */
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     // Base layer with all of the mouse-related stuff for everyday use.
-    [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN4, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN3,
-                                        MS_BTN1, MS_BTN2,
-                                        PKC_GESTURE, MO(LAYER_CONTROL) ),
+    [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN6, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN4,
+                                        MS_BTN1, MS_BTN3,
+                                        MS_BTN2, MO(LAYER_CONTROL) ),
     // Mirror-image of right-handed layout for lefties.
-    [LAYER_NAV_LEFT_HANDED] = LAYOUT(   MS_BTN3, PKC_DRAG_SCROLL, MS_BTN4, MS_BTN5,
-                                        MS_BTN2, MS_BTN1,
-                                        MO(LAYER_CONTROL), PKC_GESTURE ),
+    [LAYER_NAV_LEFT_HANDED] = LAYOUT(   LT(3, MS_BTN4), PKC_DRAG_SCROLL, MS_BTN5, MS_BTN6,
+                                        MS_BTN3, MS_BTN1,
+                                        MO(LAYER_CONTROL), MS_BTN2 ),
     // Layer for all of the customization options.
     [LAYER_CONTROL] = LAYOUT(           PKC_BLINKY_DPI_CONFIG, PKC_ADJUST_LED_BRIGHTNESS, PKC_TGL_VERT_SCRL, PKC_TGL_HORIZ_SCRL,
                                         PKC_TGL_MIRROR, PKC_TGL_DRAG_SCRL,
@@ -432,11 +432,37 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
 }
 
 /* State variables for the scroll wheels. */
-int16_t leftwheel_lowres_scroll_tick = 0;
-int16_t rightwheel_lowres_scroll_tick = 0;
+int16_t leftwheel_scroll_acc = 0;   /* Accumulator for accelerated scroll. */
+int16_t rightwheel_scroll_acc = 0;
 
 int16_t leftwheel_arrow_scroll_tick = 0;
 int16_t rightwheel_arrow_scroll_tick = 0;
+
+/* Scroll acceleration curve thresholds (absolute per-tick |wheel_delta|).
+   Faster spins shrink the effective divisor (see scroll_accel_apply), so
+   scroll output grows super-linearly. Tune to taste. */
+#define SCROLL_ACCEL_SPEED_1 16
+#define SCROLL_ACCEL_SPEED_2 32
+#define SCROLL_ACCEL_SPEED_3 64
+#define SCROLL_ACCEL_SPEED_4 128
+
+/* Accumulate wheel movement and emit scroll using an adaptive divisor (a
+   curve on movement speed). Mirrors better_dragscroll's accumulate-then-
+   divide, but with a speed curve instead of a fixed divisor. Returns the
+   scroll delta to emit and keeps the remainder in *acc. */
+static int16_t scroll_accel_apply(int16_t *acc, int16_t delta, int16_t base_div) {
+    *acc += delta;
+    int16_t speed = abs(delta);
+    int16_t div = base_div;
+    if      (speed > SCROLL_ACCEL_SPEED_4) div = base_div / 4;
+    else if (speed > SCROLL_ACCEL_SPEED_3) div = base_div / 2;
+    else if (speed > SCROLL_ACCEL_SPEED_2) div = base_div * 3 / 4;
+    else if (speed > SCROLL_ACCEL_SPEED_1) div = (base_div * 7) / 8;
+    if (div < 1) div = 1;
+    int16_t out = *acc / div;
+    *acc -= out * div;
+    return out;
+}
 
 int16_t leftwheel_volume_scroll_tick = 0;
 int16_t rightwheel_volume_scroll_tick = 0;
@@ -607,81 +633,44 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
 
                 if( user_config.left_handed ) {
                     if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = leftwheel_delta / TMAG5273_HORIZONAL_WHEEL_SPEED_DIV;
+                        mouse_report.h = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_HORIZONAL_WHEEL_SPEED_DIV);
                     }
 
                 }
                 else {
-                    mouse_report.v = -leftwheel_delta / TMAG5273_VERTICAL_WHEEL_SPEED_DIV;
+                    mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_VERTICAL_WHEEL_SPEED_DIV);
                 }
             }
             if ( rightwheel_deadzone_distance > (TMAG5273_WHEEL_DEADZONE - 10) ||
                  rightwheel_deadzone_distance < (-TMAG5273_WHEEL_DEADZONE + 10)) {
 
                 if( user_config.left_handed ) {
-                    mouse_report.v = -rightwheel_delta / TMAG5273_VERTICAL_WHEEL_SPEED_DIV;
+                    mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_VERTICAL_WHEEL_SPEED_DIV);
                 }
                 else {
                     if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = rightwheel_delta / TMAG5273_HORIZONAL_WHEEL_SPEED_DIV;
+                        mouse_report.h = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_HORIZONAL_WHEEL_SPEED_DIV);
                     }
                 }
             }
 
         } else {
-            /* In this case, we're on another OS, so we just send regular scroll events. */
-            /* Certain operating systems, like MacOS, don't play well with the
-               high-res scrolling implementation. For more details, see:
+            /* In this case, we're on another OS, so we just send regular scroll
+               events (integer "ticks"). MacOS in particular doesn't play well
+               with the high-res scrolling implementation. See:
                https://github.com/qmk/qmk_firmware/issues/17585#issuecomment-2325248167
-               128 gives the scroll wheels "ticks". */
-
-            leftwheel_lowres_scroll_tick += leftwheel_delta;
-            rightwheel_lowres_scroll_tick += rightwheel_delta;
-
+               Acceleration is applied via scroll_accel_apply(), so faster spins
+               emit more ticks. */
             if( user_config.left_handed ) {
-                if( leftwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
-                    if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = -1;
-                    }
-                    leftwheel_lowres_scroll_tick = 0;
+                if( !user_config.horizontal_scroll_arrows ) {
+                    mouse_report.h = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
                 }
-                else if( leftwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
-                    if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = 1;
-                    }
-                    leftwheel_lowres_scroll_tick = 0;
-                }
-
-                if( rightwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = 1;
-                    rightwheel_lowres_scroll_tick = 0;
-                }
-                else if( rightwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = -1;
-                    rightwheel_lowres_scroll_tick = 0;
-                }
+                mouse_report.v = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
             }
             else {
-                if( leftwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = 1;
-                    leftwheel_lowres_scroll_tick = 0;
-                }
-                else if( leftwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
-                    mouse_report.v = -1;
-                    leftwheel_lowres_scroll_tick = 0;
-                }
-
-                if( rightwheel_lowres_scroll_tick > TMAG5273_LOWRES_TICK_SIZE ) {
-                    if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = -1;
-                    }
-                    rightwheel_lowres_scroll_tick = 0;
-                }
-                else if( rightwheel_lowres_scroll_tick < -TMAG5273_LOWRES_TICK_SIZE ) {
-                    if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = 1;
-                    }
-                    rightwheel_lowres_scroll_tick = 0;
+                mouse_report.v = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
+                if( !user_config.horizontal_scroll_arrows ) {
+                    mouse_report.h = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
                 }
             }
         }

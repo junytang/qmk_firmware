@@ -7,7 +7,7 @@ RGBLIGHT_ENABLE = yes
 
 POINTING_DEVICE_ENABLE = yes
 VIA_ENABLE = yes
-USER_NAME = junytang
+# USER_NAME = junytang
 
 ## Uncomment to get debug output (also see keyboard_post_init_user()
 ## in keymap.c for more things to uncomment.)
