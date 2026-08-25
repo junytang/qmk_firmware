@@ -441,7 +441,7 @@ int16_t rightwheel_arrow_scroll_tick = 0;
 /* Scroll acceleration curve thresholds (absolute per-tick |wheel_delta|).
    Faster spins shrink the effective divisor (see scroll_accel_apply), so
    scroll output grows super-linearly. Tune to taste. */
-#define SCROLL_ACCEL_SPEED_1 16
+#define SCROLL_ACCEL_SPEED_1 24
 #define SCROLL_ACCEL_SPEED_2 32
 #define SCROLL_ACCEL_SPEED_3 64
 #define SCROLL_ACCEL_SPEED_4 128
@@ -451,8 +451,13 @@ int16_t rightwheel_arrow_scroll_tick = 0;
    divide, but with a speed curve instead of a fixed divisor. Returns the
    scroll delta to emit and keeps the remainder in *acc. */
 static int16_t scroll_accel_apply(int16_t *acc, int16_t delta, int16_t base_div) {
-    *acc += delta;
     int16_t speed = abs(delta);
+    /* Below the lowest curve threshold, behave like the original fixed-divisor
+       scroll (no cross-tick accumulator) to avoid low-speed pulsing. */
+    if (speed <= SCROLL_ACCEL_SPEED_1) {
+        return delta / base_div;
+    }
+    *acc += delta;
     int16_t div = base_div;
     if      (speed > SCROLL_ACCEL_SPEED_4) div = base_div / 4;
     else if (speed > SCROLL_ACCEL_SPEED_3) div = base_div / 2;
@@ -663,14 +668,14 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
                emit more ticks. */
             if( user_config.left_handed ) {
                 if( !user_config.horizontal_scroll_arrows ) {
-                    mouse_report.h = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
+                    mouse_report.h = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
                 }
-                mouse_report.v = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
+                mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
             }
             else {
-                mouse_report.v = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
+                mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
                 if( !user_config.horizontal_scroll_arrows ) {
-                    mouse_report.h = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
+                    mouse_report.h = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
                 }
             }
         }

@@ -40,7 +40,7 @@
 
 /* Use different divisors for horizontal and vertical scrolls because they
    get used for different applications. */
-#define TMAG5273_HORIZONAL_WHEEL_SPEED_DIV 2
+#define TMAG5273_HORIZONAL_WHEEL_SPEED_DIV 4
 
 /* This value determines how far apart scroll wheel "ticks" are when
    emulating low-res scrolling. Tick units are in fractions of
