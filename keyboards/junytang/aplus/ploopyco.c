@@ -231,7 +231,7 @@ void keyboard_pre_init_kb(void) {
 
 void pointing_device_init_kb(void) {
     keyboard_config.raw = eeconfig_read_kb();
-    if (keyboard_config.dpi_config > DPI_OPTION_SIZE) {
+    if (keyboard_config.dpi_config >= DPI_OPTION_SIZE) {
         eeconfig_init_kb();
     }
     pointing_device_set_cpi(dpi_array[keyboard_config.dpi_config]);
@@ -240,6 +240,11 @@ void pointing_device_init_kb(void) {
 }
 
 void keyboard_post_init_kb(void) {
+    // Re-apply the saved DPI now that the pointing device is fully initialized.
+    // pointing_device_init_kb() may run before the sensor is ready, causing the
+    // CPI write to be dropped and the saved value to appear "lost" after reboot.
+    pointing_device_set_cpi(dpi_array[keyboard_config.dpi_config]);
+
     keyboard_post_init_user();
 }
 

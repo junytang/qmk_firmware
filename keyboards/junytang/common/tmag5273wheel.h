@@ -36,11 +36,11 @@
 // TMAG5273_WHEEL_SPEED_DIV is an integer divisor of
 // TMAG5273_WHEEL_DEADZONE (i.e. 3 is an integer divisor of 12, but
 // 5 is not).
-#define TMAG5273_VERTICAL_WHEEL_SPEED_DIV 4
+#define TMAG5273_VERTICAL_WHEEL_SPEED_DIV 2
 
 /* Use different divisors for horizontal and vertical scrolls because they
    get used for different applications. */
-#define TMAG5273_HORIZONAL_WHEEL_SPEED_DIV 4
+#define TMAG5273_HORIZONAL_WHEEL_SPEED_DIV 2
 
 /* This value determines how far apart scroll wheel "ticks" are when
    emulating low-res scrolling. Tick units are in fractions of

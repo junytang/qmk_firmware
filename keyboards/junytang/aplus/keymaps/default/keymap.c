@@ -432,41 +432,49 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
 }
 
 /* State variables for the scroll wheels. */
-int16_t leftwheel_scroll_acc = 0;   /* Accumulator for accelerated scroll. */
-int16_t rightwheel_scroll_acc = 0;
+int32_t leftwheel_scroll_acc = 0;   /* Bresenham residual for accelerated scroll. */
+int32_t rightwheel_scroll_acc = 0;
 
 int16_t leftwheel_arrow_scroll_tick = 0;
 int16_t rightwheel_arrow_scroll_tick = 0;
 
-/* Scroll acceleration curve thresholds (absolute per-tick |wheel_delta|).
-   Faster spins shrink the effective divisor (see scroll_accel_apply), so
-   scroll output grows super-linearly. Tune to taste. */
-#define SCROLL_ACCEL_SPEED_1 24
-#define SCROLL_ACCEL_SPEED_2 32
-#define SCROLL_ACCEL_SPEED_3 64
+/* Scroll acceleration tuning. SCROLL_ACCEL_SPEED_1 is the per-tick |wheel_delta|
+   at which acceleration begins (below it, plain base_div is used).
+   SCROLL_ACCEL_SPEED_4 is the speed at which the maximum boost is reached.
+   SCROLL_ACCEL_MAX_BOOST is the max scroll-rate multiplier vs the base divisor. */
+#define SCROLL_ACCEL_SPEED_1 16
 #define SCROLL_ACCEL_SPEED_4 128
+#define SCROLL_ACCEL_MAX_BOOST 5
 
-/* Accumulate wheel movement and emit scroll using an adaptive divisor (a
-   curve on movement speed). Mirrors better_dragscroll's accumulate-then-
-   divide, but with a speed curve instead of a fixed divisor. Returns the
-   scroll delta to emit and keeps the remainder in *acc. */
-static int16_t scroll_accel_apply(int16_t *acc, int16_t delta, int16_t base_div) {
-    int16_t speed = abs(delta);
-    /* Below the lowest curve threshold, behave like the original fixed-divisor
-       scroll (no cross-tick accumulator) to avoid low-speed pulsing. */
-    if (speed <= SCROLL_ACCEL_SPEED_1) {
-        return delta / base_div;
+/* Accumulate wheel movement and emit scroll with a continuous, speed-dependent
+   multiplier (no step jumps). Accumulation lets slow scrolling still register
+   (important for the Mac/low-res path where base_div is large), and clearing
+   the residual on direction reversal keeps the two directions symmetric.
+   The Bresenham residual is carried in *acc (fine-grained, so no coarse
+   low-speed beat), giving a smooth average rate. */
+static int16_t scroll_accel_apply(int32_t *acc, int16_t delta, int16_t base_div) {
+    /* Drop any leftover residual when the wheel reverses, so scrolling one
+       direction doesn't "unwind" residual motion from the other. */
+    if ((delta > 0 && *acc < 0) || (delta < 0 && *acc > 0)) {
+        *acc = 0;
     }
-    *acc += delta;
-    int16_t div = base_div;
-    if      (speed > SCROLL_ACCEL_SPEED_4) div = base_div / 4;
-    else if (speed > SCROLL_ACCEL_SPEED_3) div = base_div / 2;
-    else if (speed > SCROLL_ACCEL_SPEED_2) div = base_div * 3 / 4;
-    else if (speed > SCROLL_ACCEL_SPEED_1) div = (base_div * 7) / 8;
-    if (div < 1) div = 1;
-    int16_t out = *acc / div;
-    *acc -= out * div;
-    return out;
+
+    int16_t speed = abs(delta);
+    int32_t factor = 256;  /* 1.0 in 8.8 fixed point */
+    if (speed > SCROLL_ACCEL_SPEED_1) {
+        int32_t num = (int32_t)(speed - SCROLL_ACCEL_SPEED_1) * (SCROLL_ACCEL_MAX_BOOST - 1) * 256;
+        int32_t den = (SCROLL_ACCEL_SPEED_4 - SCROLL_ACCEL_SPEED_1);
+        factor = 256 + num / den;
+        int32_t maxf = (int32_t)SCROLL_ACCEL_MAX_BOOST * 256;
+        if (factor > maxf) factor = maxf;
+    }
+
+    /* Bresenham: residual += motion * factor; emit integer scrolls of
+       (base_div * 256) units each. Residual stays within [0, base_div*256). */
+    int32_t frac = *acc + (int32_t)delta * factor;
+    int32_t out32 = frac / ((int32_t)base_div * 256);
+    *acc = frac - out32 * ((int32_t)base_div * 256);
+    return (int16_t)out32;
 }
 
 int16_t leftwheel_volume_scroll_tick = 0;
