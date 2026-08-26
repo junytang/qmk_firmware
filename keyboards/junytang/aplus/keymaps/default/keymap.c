@@ -26,6 +26,8 @@
 #include "../../../common/tmag5273wheel.h"
 #include "pointing_device_gestures.h"
 
+#include "math.h"
+
 /* State variables for wheels. */
 uint16_t leftwheel_deadzone_center = 0;
 uint16_t rightwheel_deadzone_center = 0;
@@ -474,12 +476,19 @@ int32_t rightwheel_scroll_acc = 0;
 int16_t leftwheel_arrow_scroll_tick = 0;
 int16_t rightwheel_arrow_scroll_tick = 0;
 
-/* Scroll acceleration tuning. SCROLL_ACCEL_SPEED_1 is the per-tick |wheel_delta|
-   at which acceleration begins (below it, plain base_div is used).
-   SCROLL_ACCEL_SPEED_4 is the speed at which the maximum boost is reached.
-   SCROLL_ACCEL_MAX_BOOST is the max scroll-rate multiplier vs the base divisor. */
-#define SCROLL_ACCEL_SPEED_1 16
-#define SCROLL_ACCEL_SPEED_4 128
+/* Scroll acceleration tuning (logistic / sigmoid curve):
+     factor = 1 + (MAX_BOOST - 1) / (1 + e^(-K * (speed - MID)))
+   Gentle (≈1.0) below MID, steepest near MID, then flat at MAX_BOOST above --
+   so low/mid speed stays calm while the top still reaches MAX_BOOST at a finite
+   speed. (The old v/(v+SAT) curve was front-loaded: steepest at speed 0 and
+   asymptotic at the top, which felt "too steep low, top not fast enough".)
+     MID       : per-tick |wheel_delta| where boost is halfway; larger = engages
+                 later / calmer low end.
+     K         : transition steepness (1/width); larger = sharper knee.
+     MAX_BOOST : top scroll-rate multiplier vs the base divisor. */
+#define SCROLL_ACCEL_MID 160
+#define SCROLL_ACCEL_K 0.03f
+#define SCROLL_ACCEL_MIN 1.0f
 #define SCROLL_ACCEL_MAX_BOOST 4
 
 /* Accumulate wheel movement and emit scroll with a continuous, speed-dependent
@@ -496,14 +505,18 @@ static int16_t scroll_accel_apply(int32_t *acc, int16_t delta, int16_t base_div)
     }
 
     int16_t speed = abs(delta);
-    int32_t factor = 256;  /* 1.0 in 8.8 fixed point */
-    if (speed > SCROLL_ACCEL_SPEED_1) {
-        int32_t num = (int32_t)(speed - SCROLL_ACCEL_SPEED_1) * (SCROLL_ACCEL_MAX_BOOST - 1) * 256;
-        int32_t den = (SCROLL_ACCEL_SPEED_4 - SCROLL_ACCEL_SPEED_1);
-        factor = 256 + num / den;
-        int32_t maxf = (int32_t)SCROLL_ACCEL_MAX_BOOST * 256;
-        if (factor > maxf) factor = maxf;
-    }
+    /* Logistic (sigmoid) acceleration with a sub-1 low-speed floor:
+         f = MIN + (MAX - MIN) / (1 + e^(-K*(speed - MID)))
+       Below ~MID the factor dips toward MIN (<1.0) for finer "creep" precision,
+       then rises smoothly through MID and plateaus at MAX_BOOST -- no kink, and
+       the top is reached at a finite speed (unlike the old rational curve). */
+    float f = SCROLL_ACCEL_MIN + (SCROLL_ACCEL_MAX_BOOST - SCROLL_ACCEL_MIN) /
+                                  (1.0f + expf(-SCROLL_ACCEL_K * (speed - SCROLL_ACCEL_MID)));
+    int32_t factor = (int32_t)(f * 256.0f);
+    int32_t maxf = (int32_t)SCROLL_ACCEL_MAX_BOOST * 256;
+    int32_t minf = (int32_t)(SCROLL_ACCEL_MIN * 256.0f);
+    if (factor > maxf) factor = maxf;
+    if (factor < minf) factor = minf;
 
     /* Bresenham: residual += motion * factor; emit integer scrolls of
        (base_div * 256) units each. Residual stays within [0, base_div*256). */
