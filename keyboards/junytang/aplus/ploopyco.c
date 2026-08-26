@@ -44,7 +44,7 @@
 #    endif
 #endif
 #ifndef PLOOPY_DPI_DEFAULT
-#    define PLOOPY_DPI_DEFAULT 0
+#    define PLOOPY_DPI_DEFAULT 2
 #endif
 #ifndef PLOOPY_DRAGSCROLL_DIVISOR_H
 #    define PLOOPY_DRAGSCROLL_DIVISOR_H 8.0

@@ -18,6 +18,7 @@
 #include QMK_KEYBOARD_H
 
 #include "../../ploopyco.h"
+#include "../../gesture_mode.h"
 
 #include "rgblight.h"
 #include "printf.h"
@@ -59,19 +60,9 @@ enum {
     OPTION_CHANGED_LAYER_COLOUR
 };
 
- /* EEPROM memory for the various persistent states that the A+ can have.
-    See eeconfig_init_user() for default values and meanings. */
-typedef union {
-  uint32_t raw;
-  struct {
-    bool    left_handed :1;
-    bool    horizontal_scroll_arrows :1;
-    bool    vertical_scroll_arrows :1;
-    bool    drag_scroll_mode :1;
-    uint8_t led_brightness: 8;
-  };
-} user_config_t;
-
+  /* EEPROM memory for the various persistent states that the A+ can have.
+     See eeconfig_init_user() for default values and meanings. The struct is
+     defined in gesture_mode.h. */
 user_config_t user_config;
 
 /* Add custom keycodes for control layer. */
@@ -114,13 +105,28 @@ void pointing_device_gestures_trigger(uint8_t direction) {
             }
             break;
         case 1: /* South-East, Paste. */
-            tap_code16( C(KC_V) );
+            /* On Windows/Linux, send CTRL + V. On MacOs, send CMD + V. */
+            if ( detected_host_os() != OS_MACOS ) {
+                tap_code16( C(KC_V) );
+            } else {
+                tap_code16( G(KC_V) );
+            }
             break;
         case 2: /* South, Copy. */
-            tap_code16( C(KC_C) );
+            /* On Windows/Linux, send CTRL + C. On MacOs, send CMD + C. */
+            if ( detected_host_os() != OS_MACOS ) {
+                tap_code16( C(KC_C) );
+            } else {
+                tap_code16( G(KC_C) );
+            }
             break;
         case 3: /* South-West, Cut. */
-            tap_code16( C(KC_X) );
+            /* On Windows/Linux, send CTRL + X. On MacOs, send CMD + X. */
+            if ( detected_host_os() != OS_MACOS ) {
+                tap_code16( C(KC_X) );
+            } else {
+                tap_code16( G(KC_X) );
+            }
             break;
         case 4: /* West, Previous Virtual Desktop. */
             /* On Windows, send CTRL + LGUI + LEFT. */
@@ -137,7 +143,12 @@ void pointing_device_gestures_trigger(uint8_t direction) {
             }
             break;
         case 5: /* North-West, Undo. */
-            tap_code16( C(KC_Z) );
+            /* On Windows/Linux, send CTRL + Z. On MacOs, send CMD + Z. */
+            if ( detected_host_os() != OS_MACOS ) {
+                tap_code16( C(KC_Z) );
+            } else {
+                tap_code16( G(KC_Z) );
+            }
             break;
         case 6: /* North, Play/Pause Audio. */
             tap_code16( KC_MEDIA_PLAY_PAUSE );
@@ -171,16 +182,18 @@ void pointing_device_gestures_trigger(uint8_t direction) {
 const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
     GESTURES_CARDINAL_AND_ORDINAL_DIRECTIONS( KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO );
 
-/* Keymap. */
-const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
-    // Base layer with all of the mouse-related stuff for everyday use.
-    [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN6, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN4,
+    /* Keymap. */
+    const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
+        // Base layer with all of the mouse-related stuff for everyday use.
+        [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN6, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN4,
                                         MS_BTN1, MS_BTN3,
-                                        MS_BTN2, MO(LAYER_CONTROL) ),
-    // Mirror-image of right-handed layout for lefties.
-    [LAYER_NAV_LEFT_HANDED] = LAYOUT(   LT(3, MS_BTN4), PKC_DRAG_SCROLL, MS_BTN5, MS_BTN6,
+                                        TD(TD_GESTURE), MO(LAYER_CONTROL) ),
+        // Mirror-image of right-handed layout for lefties.
+        [LAYER_NAV_LEFT_HANDED] = LAYOUT(   LT(3, MS_BTN4), PKC_DRAG_SCROLL, MS_BTN5, MS_BTN6,
                                         MS_BTN3, MS_BTN1,
-                                        MO(LAYER_CONTROL), MS_BTN2 ),
+                                        MO(LAYER_CONTROL), TD(TD_GESTURE) ),
+        // (Layer 7 is intentionally left as a transparent spare; the gesture
+        //  button is now TD_GESTURE: tap = gesture_tap_keycode, hold = gesture.)
     // Layer for all of the customization options.
     [LAYER_CONTROL] = LAYOUT(           PKC_BLINKY_DPI_CONFIG, PKC_ADJUST_LED_BRIGHTNESS, PKC_TGL_VERT_SCRL, PKC_TGL_HORIZ_SCRL,
                                         PKC_TGL_MIRROR, PKC_TGL_DRAG_SCRL,
@@ -190,6 +203,16 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     [5] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
     [6] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
     [7] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ )
+};
+
+/* Single tap-dance gesture trigger: tap sends user_config.gesture_tap_keycode,
+ * hold engages a pointing-device gesture. Defined here (not gesture_mode.c) so
+ * QMK's keymap introspection, which includes this file, can see it. */
+tap_dance_action_t tap_dance_actions[] = {
+    [TD_GESTURE] = { .fn = { .on_each_tap       = gesturetd_press,
+                             .on_dance_finished = gesturetd_fin,
+                             .on_reset          = gesturetd_rst },
+                     .user_data = (void *)&user_config.gesture_tap_keycode },
 };
 
 /* Called whenever layers are modified. */
@@ -225,6 +248,9 @@ layer_state_t layer_state_set_user(layer_state_t state) {
             dprintf("change layer: oopsie, invalid layer!\n");
             break;
     }
+
+    /* Gesture mode is driven by the TD_GESTURE tap-dance, not a layer. */
+
     return state;
 }
 
@@ -238,6 +264,7 @@ void eeconfig_init_user(void) {
     user_config.vertical_scroll_arrows = false;     // False = Scroll events, True = up/down arrows.
     user_config.drag_scroll_mode = false;           // Hold to activate.
     user_config.led_brightness = 4;                 // Brightest mode by default.
+    user_config.gesture_tap_keycode = MS_BTN2;    // Tap of the gesture key.
 
     eeconfig_update_user(user_config.raw);
 }
@@ -429,6 +456,15 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
         default:
             return true;
     }
+}
+
+/* LED feedback for the tap/hold MS_BTN2 <-> gesture key (gesture_mode.c).
+   Mirrors the lighting used by PKC_GESTURE. */
+void gesture_mode_led_on(void) {
+    rgblight_set_layer_state(GESTURE_LAYER_COLOUR, true);
+}
+void gesture_mode_led_off(void) {
+    rgblight_set_layer_state(GESTURE_LAYER_COLOUR, false);
 }
 
 /* State variables for the scroll wheels. */
