@@ -480,7 +480,7 @@ int16_t rightwheel_arrow_scroll_tick = 0;
    SCROLL_ACCEL_MAX_BOOST is the max scroll-rate multiplier vs the base divisor. */
 #define SCROLL_ACCEL_SPEED_1 16
 #define SCROLL_ACCEL_SPEED_4 128
-#define SCROLL_ACCEL_MAX_BOOST 5
+#define SCROLL_ACCEL_MAX_BOOST 4
 
 /* Accumulate wheel movement and emit scroll with a continuous, speed-dependent
    multiplier (no step jumps). Accumulation lets slow scrolling still register
@@ -674,54 +674,49 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
             }
         }
 
-        /* If we're on Windows or Linux, send hi-res scroll events. */
-        if ( (detected_host_os() == OS_WINDOWS || detected_host_os() == OS_LINUX) ) {
+        /* Accumulate (and emit) only once the wheel is OUTSIDE the deadzone.
+           While inside the deadzone the residual is reset to zero, so the motion
+           made before crossing is intentionally discarded (anti-jitter: no scroll
+           near rest) and the scroll count starts fresh from zero at the crossing
+           point -- never a burst of accumulated startup motion. The wheel->axis
+           mapping is identical for hi-res and low-res OSes; only the divisor
+           differs, so the deadzone gate applies uniformly (incl. macOS). */
+        bool hi_res = (detected_host_os() == OS_WINDOWS || detected_host_os() == OS_LINUX);
 
-            if ( leftwheel_deadzone_distance > (TMAG5273_WHEEL_DEADZONE - 10) ||
-                 leftwheel_deadzone_distance < (-TMAG5273_WHEEL_DEADZONE + 10)) {
+        bool left_is_h  = user_config.left_handed;
+        bool right_is_h = !user_config.left_handed;
 
-                if( user_config.left_handed ) {
-                    if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_HORIZONAL_WHEEL_SPEED_DIV);
-                    }
+        int16_t left_div  = hi_res ? (left_is_h  ? TMAG5273_HORIZONAL_WHEEL_SPEED_DIV : TMAG5273_VERTICAL_WHEEL_SPEED_DIV)
+                                   : TMAG5273_LOWRES_TICK_SIZE;
+        int16_t right_div = hi_res ? (right_is_h ? TMAG5273_HORIZONAL_WHEEL_SPEED_DIV : TMAG5273_VERTICAL_WHEEL_SPEED_DIV)
+                                   : TMAG5273_LOWRES_TICK_SIZE;
 
+        bool left_outside  = leftwheel_deadzone_distance  > (TMAG5273_WHEEL_DEADZONE - 10) ||
+                             leftwheel_deadzone_distance  < (-TMAG5273_WHEEL_DEADZONE + 10);
+        bool right_outside = rightwheel_deadzone_distance > (TMAG5273_WHEEL_DEADZONE - 10) ||
+                             rightwheel_deadzone_distance < (-TMAG5273_WHEEL_DEADZONE + 10);
+
+        if ( left_outside ) {
+            if ( left_is_h ) {
+                if ( !user_config.horizontal_scroll_arrows ) {
+                    mouse_report.h = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, left_div);
                 }
-                else {
-                    mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_VERTICAL_WHEEL_SPEED_DIV);
-                }
+            } else {
+                mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, left_div);
             }
-            if ( rightwheel_deadzone_distance > (TMAG5273_WHEEL_DEADZONE - 10) ||
-                 rightwheel_deadzone_distance < (-TMAG5273_WHEEL_DEADZONE + 10)) {
-
-                if( user_config.left_handed ) {
-                    mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_VERTICAL_WHEEL_SPEED_DIV);
-                }
-                else {
-                    if( !user_config.horizontal_scroll_arrows ) {
-                        mouse_report.h = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_HORIZONAL_WHEEL_SPEED_DIV);
-                    }
-                }
-            }
-
         } else {
-            /* In this case, we're on another OS, so we just send regular scroll
-               events (integer "ticks"). MacOS in particular doesn't play well
-               with the high-res scrolling implementation. See:
-               https://github.com/qmk/qmk_firmware/issues/17585#issuecomment-2325248167
-               Acceleration is applied via scroll_accel_apply(), so faster spins
-               emit more ticks. */
-            if( user_config.left_handed ) {
-                if( !user_config.horizontal_scroll_arrows ) {
-                    mouse_report.h = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
+            leftwheel_scroll_acc = 0;
+        }
+        if ( right_outside ) {
+            if ( right_is_h ) {
+                if ( !user_config.horizontal_scroll_arrows ) {
+                    mouse_report.h = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, right_div);
                 }
-                mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
+            } else {
+                mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, right_div);
             }
-            else {
-                mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
-                if( !user_config.horizontal_scroll_arrows ) {
-                    mouse_report.h = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, TMAG5273_LOWRES_TICK_SIZE);
-                }
-            }
+        } else {
+            rightwheel_scroll_acc = 0;
         }
 
         /* Set scroll data to zero if the corresponding button is

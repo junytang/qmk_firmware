@@ -38,7 +38,7 @@
 
 #ifndef PLOOPY_DPI_OPTIONS
 #    define PLOOPY_DPI_OPTIONS \
-        { 600, 800, 1000, 1600, 2400 }
+        { 600, 1000, 1400, 1800, 2200 }
 #    ifndef PLOOPY_DPI_DEFAULT
 #        define PLOOPY_DPI_DEFAULT 2
 #    endif
