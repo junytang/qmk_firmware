@@ -419,8 +419,6 @@ void keyboard_post_init_user(void) {
 
     /* ========================== Scroll Wheel Setup ======================= */
 
-    scroll_accel_rebuild_lut(); // 开机初始化时，预先生成一次 Sigmoid 查表
-
     /* Start up the two wheels. */
     tmag5273_init();
 
@@ -494,6 +492,7 @@ void keyboard_post_init_user(void) {
         };
         scroll_accel_config_update();
     }
+    scroll_accel_rebuild_lut(); // 开机初始化时，预先生成一次 Sigmoid 查表
 
     /* Load DPI presets/active preset from the EECONFIG user-data block. Reseed
        defaults if it was never written (all-zero) or is corrupt (active >= 5). */
@@ -800,7 +799,9 @@ static int16_t scroll_accel_apply(int32_t *acc, int16_t delta, int16_t base_div)
         scroll_accel_rebuild_lut();
     }
 
-    int16_t speed = abs(delta);
+    /* 用有符号转无符号避免 abs(INT16_MIN) 的实现定义行为（虽 delta 已被
+       calculate_wheel_delta 限制在 ±8191，仍做防御）。 */
+    int32_t speed = (delta < 0) ? -(int32_t)delta : (int32_t)delta;
     int32_t factor;
 
     /* 【核心优化】：瞬间 O(1) 纯整数查表，耗时 8 纳秒，完全消除 powf/expf 开销！ */
