@@ -24,6 +24,12 @@
 #include "printf.h"
 
 #include "../../../common/tmag5273wheel.h"
+/* pmw33xx_init()/pmw33xx_check_signature() are linked from the pmw33xx sensor
+   driver (POINTING_DEVICE_DRIVER = pmw3360) but its header
+   (drivers/sensors/pmw33xx_common.h) is not on the keymap include path. Declare
+   the symbols we need locally instead of patching QMK core. */
+extern bool pmw33xx_init(uint8_t sensor);
+extern bool pmw33xx_check_signature(uint8_t sensor);
 #include "pointing_device_gestures.h"
 
 #include "math.h"
@@ -35,6 +41,15 @@ uint16_t rightwheel_deadzone_center = 0;
 uint16_t leftwheel_current_position = 0;
 uint16_t rightwheel_current_position = 0;
 uint32_t last_scroll_time = 0;
+
+/* Latest raw TMAG5273 angles, polled in housekeeping_task_user rather than in
+   pointing_device_task_user. The ChibiOS I2C driver is interrupt-driven, so its
+   completion IRQ used to land during the PMW3360 SPI read (which runs earlier,
+   inside pointing_device_driver->get_report) and wedge the sensor. Polling here
+   means the I2C transaction and its completion IRQ are fully serviced before the
+   SPI read ever runs, so they can no longer preempt it. */
+static volatile uint16_t leftwheel_angle_stored  = 0;
+static volatile uint16_t rightwheel_angle_stored = 0;
 
 /* Layer lighting, used to blink when making gestures. */
 const rgblight_segment_t PROGMEM righty_nav_layer_colour[] =        RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_NAVBLUE} );
@@ -367,6 +382,29 @@ void keyboard_pre_init_user(void) {
 
 }
 
+/* PMW3360 watchdog: a dedicated low-priority thread periodically checks whether
+   the sensor still responds. Its SPI read can very rarely wedge (timing collision
+   with the TMAG5273 I2C that trident, which has no TMAG5273, never hits),
+   freezing the pointer until a power cycle. If it stops responding, soft-reinit
+   it via SPI. Kept on an isolated thread so a wedged SPI read here can never
+   stall the main loop / pointer + keyboard handling. */
+static THD_WORKING_AREA(wa_pmw_wd_thread, 512);
+static THD_FUNCTION(pmw_wd_worker, arg) {
+    (void)arg;
+    chRegSetThreadName("pmw3360_wd");
+    uint32_t wd_count = 0;
+    while (true) {
+        chThdSleepMilliseconds(50);
+        if (++wd_count >= 60) { /* ~3s */
+            wd_count = 0;
+            if (!pmw33xx_check_signature(0)) {
+                pmw33xx_init(0);
+                dpi_apply();
+            }
+        }
+    }
+}
+
 void keyboard_post_init_user(void) {
     /* ============================ Debug Setup ============================ */
 
@@ -398,6 +436,11 @@ void keyboard_post_init_user(void) {
     wait_ms(20);
     rightwheel_current_position = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
     rightwheel_deadzone_center = rightwheel_current_position;
+
+    /* Seed the polled-angle buffers so the first wheel delta is zero until
+       housekeeping_task_user starts updating them. */
+    leftwheel_angle_stored  = leftwheel_current_position;
+    rightwheel_angle_stored = rightwheel_current_position;
 
 
     /* =================== Persistent Configuration Setup ================== */
@@ -462,6 +505,9 @@ void keyboard_post_init_user(void) {
         dpi_config_update();
     }
     dpi_apply();
+
+    /* Launch the PMW3360 watchdog on an isolated low-priority thread. */
+    chThdCreateStatic(wa_pmw_wd_thread, sizeof(wa_pmw_wd_thread), LOWPRIO, pmw_wd_worker, NULL);
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
@@ -687,11 +733,27 @@ int16_t rightwheel_volume_scroll_tick = 0;
 uint32_t leftwheel_timeout = 0;
 uint32_t rightwheel_timeout = 0;
 
+/* Poll the TMAG5273 wheels out of pointing_device_task_user so the interrupt-
+   driven I2C transaction (and its completion IRQ) is fully serviced here, before
+   the PMW3360 SPI read runs inside pointing_device_driver->get_report. This
+   removes the IRQ preemption that used to wedge the sensor. Angle values are
+   published to the volatile buffers consumed by pointing_device_task_user. */
+void housekeeping_task_user(void) {
+    static uint32_t last_wheel_i2c_time = 0;
+    if (timer_elapsed32(last_wheel_i2c_time) > 10) {
+        leftwheel_angle_stored  = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
+        rightwheel_angle_stored = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
+        last_wheel_i2c_time = timer_read32();
+        // 等待所有 I2C pending中断处理完毕, 下次SPI 开始的时候，保证 I2C 中断队列已经清空
+        wait_us(20);
+    }
+}
+
 report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
     // throttle reads
     if (timer_elapsed32(last_scroll_time) > 10) {
-        uint16_t leftwheel_rawangle = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
-        uint16_t rightwheel_rawangle = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
+        uint16_t leftwheel_rawangle = leftwheel_angle_stored;
+        uint16_t rightwheel_rawangle = rightwheel_angle_stored;
 
         int16_t leftwheel_deadzone_distance = calculate_deadzone_distance( leftwheel_rawangle, &leftwheel_deadzone_center );
         int16_t rightwheel_deadzone_distance = calculate_deadzone_distance( rightwheel_rawangle, &rightwheel_deadzone_center );
