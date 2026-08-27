@@ -90,3 +90,17 @@
 
 /* How long to blink for when an option-change button is pressed. */
 #define OPTION_CHANGE_BLINK_TIMEOUT 200
+
+/* user_config (gesture keycode + board settings, 4 bytes) and the scroll-accel
+   config (4 floats, 16 bytes) are both persisted in the EECONFIG user-data block
+   via eeconfig_read_user_datablock / eeconfig_update_user_datablock in keymap.c,
+   following the pattern in users/junytang/ploopy_via.c. This keeps them out of the
+   VIA custom-config EEPROM region, which the drashna/pointing_device_accel module
+   (enabled in keymap.json) owns for its cursor-accel data -- so we deliberately do
+   NOT redefine VIA_EEPROM_CUSTOM_CONFIG_SIZE, avoiding that module's
+   "already defined" #error / per-build-unit #pragma message.
+   Layout: user_config at offset 0 (4B), scroll config at offset 4 (16B) => 20B used.
+   This must be >= 20; grow it if either struct grows. After flashing a build that
+   changes this (or moves user_config into the block), do a one-time EEPROM reset
+   so eeconfig_init_user repopulates both with defaults. */
+#define EECONFIG_USER_DATA_SIZE 28

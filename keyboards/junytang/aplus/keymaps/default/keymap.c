@@ -67,6 +67,52 @@ enum {
      defined in gesture_mode.h. */
 user_config_t user_config;
 
+/* --- VIA-tunable scroll-acceleration config (handlers at EOF, via_custom_value_command_kb) --- */
+typedef struct {
+    bool  enabled : 1;  /* master switch for curve acceleration (1 = on). */
+    float offset;       /* per-tick |wheel_delta| where boost is halfway; larger = engages later / calmer low end. */
+    float takeoff;      /* transition steepness (1/width); larger = sharper knee. Mirrors pointing_device_accel takeoff. */
+    float growth_rate;  /* saturation rate toward limit_upper; growth_rate/takeoff (g/k) shapes how fast the top is reached. Mirrors accel growth_rate. */
+    float limit;        /* low-speed floor factor (<1.0 = finer "creep"; 1.0 = 1:1 at rest). Mirrors accel limit. */
+    float limit_upper;  /* top scroll-rate multiplier vs the base divisor. Mirrors accel LIMIT_UPPER. */
+} scroll_accel_config_t;
+
+scroll_accel_config_t g_scroll_accel_config = {
+    .enabled = 1,
+    .offset = 160.0f,
+    .takeoff = 0.03f,
+    .growth_rate = 0.03f,
+    .limit = 1.0f,
+    .limit_upper = 4.0f,
+};
+
+/* Both persistent structs live in the EECONFIG user-data block
+   (EECONFIG_USER_DATA_SIZE, config.h), via eeconfig_read_user_datablock /
+   eeconfig_update_user_datablock -- matching users/junytang/ploopy_via.c.
+   Once EECONFIG_USER_DATA_SIZE > 0 the legacy eeconfig_read_user /
+   eeconfig_update_user are unavailable, so user_config and the scroll config
+   must both use the datablock API. user_config occupies the first bytes; the
+   scroll config follows it. This block is separate from the VIA custom-config
+   region, so it does not collide with the drashna/pointing_device_accel module. */
+#define USER_CONFIG_EEPROM_OFFSET 0
+#define SCROLL_ACCEL_EEPROM_OFFSET (USER_CONFIG_EEPROM_OFFSET + sizeof(user_config_t))
+_Static_assert(SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t) <= EECONFIG_USER_DATA_SIZE,
+                "user_config + scroll_accel_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
+
+/* Per-param real ranges for VIA projection (must match aplus.json "options"). */
+#define SCROLL_ACCEL_R_MIN_OFFSET 0.0f
+#define SCROLL_ACCEL_R_MAX_OFFSET 400.0f
+#define SCROLL_ACCEL_R_MIN_TAKEOFF 0.005f
+#define SCROLL_ACCEL_R_MAX_TAKEOFF 0.1f
+#define SCROLL_ACCEL_R_MIN_GROWTH_RATE 0.001f
+#define SCROLL_ACCEL_R_MAX_GROWTH_RATE 0.1f
+#define SCROLL_ACCEL_R_MIN_LIMIT 0.5f
+#define SCROLL_ACCEL_R_MAX_LIMIT 1.0f
+#define SCROLL_ACCEL_R_MIN_LIMIT_UPPER 1.0f
+#define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
+
+static void scroll_accel_config_update(void);
+
 /* Add custom keycodes for control layer. */
 enum my_keycodes {
   PKC_TGL_MIRROR = SAFE_RANGE,
@@ -268,7 +314,20 @@ void eeconfig_init_user(void) {
     user_config.led_brightness = 4;                 // Brightest mode by default.
     user_config.gesture_tap_keycode = MS_BTN2;    // Tap of the gesture key.
 
-    eeconfig_update_user(user_config.raw);
+    eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+
+    /* Persist the scroll-accel defaults into the EECONFIG user-data block.
+       Set them explicitly here (not only via the global initializer) so a
+       factory-init / wipe can never leave k or max_boost as 0. */
+    g_scroll_accel_config = (scroll_accel_config_t){
+        .enabled = 1,
+        .offset = 160.0f,
+        .takeoff = 0.03f,
+        .growth_rate = 0.03f,
+        .limit = 1.0f,
+        .limit_upper = 4.0f,
+    };
+    scroll_accel_config_update();
 }
 
 void keyboard_pre_init_user(void) {
@@ -286,10 +345,10 @@ void keyboard_post_init_user(void) {
 
     /* If you turn these on, also uncomment CONSOLE_ENABLE = yes in
        post_rules.mk! */
-    //debug_enable = true;
-    //debug_matrix=true;
-    //debug_keyboard=true;
-    //debug_mouse=true;
+    // debug_enable = true;
+    // debug_matrix=true;
+    // debug_keyboard=true;
+    // debug_mouse=true;
 
     /* ========================== Scroll Wheel Setup ======================= */
 
@@ -316,8 +375,51 @@ void keyboard_post_init_user(void) {
 
     /* =================== Persistent Configuration Setup ================== */
 
-    /* Load up configuration details from the EEPROM. */
-    user_config.raw = eeconfig_read_user();
+    /* Load up configuration details from the EEPROM user-data block. */
+    eeconfig_read_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+    /* An erased/garbage block reads as 0xFFFFFFFF (or a corrupt led_brightness);
+       reseed the board defaults and persist them so the gesture keycode and
+       lighting stay sane. */
+    if (user_config.raw == 0xFFFFFFFF || user_config.led_brightness > 7) {
+        user_config.raw = 0;
+        user_config.left_handed = true;
+        user_config.horizontal_scroll_arrows = false;
+        user_config.vertical_scroll_arrows = false;
+        user_config.drag_scroll_mode = false;
+        user_config.led_brightness = 4;
+        user_config.gesture_tap_keycode = MS_BTN2;
+        eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+    }
+
+    /* Load scroll-accel params from the EECONFIG user-data block (set by the web
+       UI via via_custom_value_command_kb). On a firmware upgrade the block may be
+       all-zero / 0xFF (not NaN) yet never written, so also guard by valid range --
+       otherwise mid/k/min/max could read 0 and kill scrolling. If invalid, reseed
+       defaults and persist them. */
+     eeconfig_read_user_datablock(&g_scroll_accel_config, SCROLL_ACCEL_EEPROM_OFFSET, sizeof(scroll_accel_config_t));
+     if (isnan(g_scroll_accel_config.offset) || isnan(g_scroll_accel_config.takeoff) ||
+         isnan(g_scroll_accel_config.growth_rate) || isnan(g_scroll_accel_config.limit) ||
+         isnan(g_scroll_accel_config.limit_upper) ||
+         g_scroll_accel_config.offset < SCROLL_ACCEL_R_MIN_OFFSET || g_scroll_accel_config.offset > SCROLL_ACCEL_R_MAX_OFFSET ||
+         g_scroll_accel_config.takeoff < SCROLL_ACCEL_R_MIN_TAKEOFF || g_scroll_accel_config.takeoff > SCROLL_ACCEL_R_MAX_TAKEOFF ||
+         g_scroll_accel_config.growth_rate < SCROLL_ACCEL_R_MIN_GROWTH_RATE || g_scroll_accel_config.growth_rate > SCROLL_ACCEL_R_MAX_GROWTH_RATE ||
+         g_scroll_accel_config.limit < SCROLL_ACCEL_R_MIN_LIMIT || g_scroll_accel_config.limit > SCROLL_ACCEL_R_MAX_LIMIT ||
+         g_scroll_accel_config.limit_upper < SCROLL_ACCEL_R_MIN_LIMIT_UPPER || g_scroll_accel_config.limit_upper > SCROLL_ACCEL_R_MAX_LIMIT_UPPER ||
+         /* A freshly-erased block reads as all-zero; offset=0 is in-range so it would
+            otherwise pass the checks above. Treat an all-zero block as uninitialized. */
+         (g_scroll_accel_config.offset == 0.0f && g_scroll_accel_config.takeoff == 0.0f &&
+          g_scroll_accel_config.growth_rate == 0.0f && g_scroll_accel_config.limit == 0.0f &&
+          g_scroll_accel_config.limit_upper == 0.0f && g_scroll_accel_config.enabled == 0)) {
+        g_scroll_accel_config = (scroll_accel_config_t){
+            .enabled = 1,
+            .offset = 160.0f,
+            .takeoff = 0.03f,
+            .growth_rate = 0.03f,
+            .limit = 1.0f,
+            .limit_upper = 4.0f,
+        };
+        scroll_accel_config_update();
+    }
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
@@ -344,7 +446,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
             if (record->event.pressed) {
                 /* Toggle handed-ness, record new state to EEPROM. */
                 user_config.left_handed ^= 1;
-                eeconfig_update_user(user_config.raw);
+                eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
 
                 /* Activate the correct navigation layer and blink the LEDs. */
                 if( user_config.left_handed ) {
@@ -362,7 +464,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
         case PKC_TGL_VERT_SCRL:
             if (record->event.pressed) {
                 user_config.vertical_scroll_arrows ^= 1;
-                eeconfig_update_user(user_config.raw);
+                eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
 
                 if( user_config.vertical_scroll_arrows ) {
                     rgblight_blink_layer(OPTION_CHANGED_LAYER_COLOUR, OPTION_CHANGE_BLINK_TIMEOUT*2);
@@ -377,7 +479,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
         case PKC_TGL_HORIZ_SCRL:
             if (record->event.pressed) {
                 user_config.horizontal_scroll_arrows ^= 1;
-                eeconfig_update_user(user_config.raw);
+                eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
 
                 if( user_config.horizontal_scroll_arrows ) {
                     rgblight_blink_layer(OPTION_CHANGED_LAYER_COLOUR, OPTION_CHANGE_BLINK_TIMEOUT*2);
@@ -392,7 +494,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
         case PKC_TGL_DRAG_SCRL:
             if (record->event.pressed) {
                 user_config.drag_scroll_mode ^= 1;
-                eeconfig_update_user(user_config.raw);
+                eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
 
                 if( user_config.drag_scroll_mode ) {
                     rgblight_blink_layer(OPTION_CHANGED_LAYER_COLOUR, OPTION_CHANGE_BLINK_TIMEOUT*2);
@@ -436,12 +538,12 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
                     rgblight_decrease_val_noeeprom();
                     rgblight_decrease_val_noeeprom();
                     user_config.led_brightness = 1;
-                    eeconfig_update_user(user_config.raw);
+                    eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
                 }
                 else {
                     rgblight_increase_val_noeeprom();
                     user_config.led_brightness += 1;
-                    eeconfig_update_user(user_config.raw);
+                    eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
                 }
 
                 dprintf("Adjusted LED brightness. Current brightness = %d/255\n", rgblight_get_val());
@@ -476,21 +578,11 @@ int32_t rightwheel_scroll_acc = 0;
 int16_t leftwheel_arrow_scroll_tick = 0;
 int16_t rightwheel_arrow_scroll_tick = 0;
 
-/* Scroll acceleration tuning (logistic / sigmoid curve):
-     factor = 1 + (MAX_BOOST - 1) / (1 + e^(-K * (speed - MID)))
-   Gentle (≈1.0) below MID, steepest near MID, then flat at MAX_BOOST above --
-   so low/mid speed stays calm while the top still reaches MAX_BOOST at a finite
-   speed. (The old v/(v+SAT) curve was front-loaded: steepest at speed 0 and
-   asymptotic at the top, which felt "too steep low, top not fast enough".)
-     MID       : per-tick |wheel_delta| where boost is halfway; larger = engages
-                 later / calmer low end.
-     K         : transition steepness (1/width); larger = sharper knee.
-     MAX_BOOST : top scroll-rate multiplier vs the base divisor. */
-#define SCROLL_ACCEL_MID 160
-#define SCROLL_ACCEL_K 0.03f
-#define SCROLL_ACCEL_MIN 1.0f
-#define SCROLL_ACCEL_MAX_BOOST 4
-
+/* Scroll acceleration tuning (generalised sigmoid curve), VIA-configurable.
+     f = limit_upper - (limit_upper - limit) / (1 + e^(takeoff*(speed - offset)))^(growth_rate/takeoff)
+   Gentle (≈limit) below offset, steepest near offset, then approaching limit_upper.
+   growth_rate/takeoff (g/k) sets how fast the top is reached. All five values plus
+   the enabled switch are runtime-adjustable from the VIA web UI (via_custom_value_command_kb). */
 /* Accumulate wheel movement and emit scroll with a continuous, speed-dependent
    multiplier (no step jumps). Accumulation lets slow scrolling still register
    (important for the Mac/low-res path where base_div is large), and clearing
@@ -505,24 +597,45 @@ static int16_t scroll_accel_apply(int32_t *acc, int16_t delta, int16_t base_div)
     }
 
     int16_t speed = abs(delta);
-    /* Logistic (sigmoid) acceleration with a sub-1 low-speed floor:
-         f = MIN + (MAX - MIN) / (1 + e^(-K*(speed - MID)))
-       Below ~MID the factor dips toward MIN (<1.0) for finer "creep" precision,
-       then rises smoothly through MID and plateaus at MAX_BOOST -- no kink, and
-       the top is reached at a finite speed (unlike the old rational curve). */
-    float f = SCROLL_ACCEL_MIN + (SCROLL_ACCEL_MAX_BOOST - SCROLL_ACCEL_MIN) /
-                                  (1.0f + expf(-SCROLL_ACCEL_K * (speed - SCROLL_ACCEL_MID)));
-    int32_t factor = (int32_t)(f * 256.0f);
-    int32_t maxf = (int32_t)SCROLL_ACCEL_MAX_BOOST * 256;
-    int32_t minf = (int32_t)(SCROLL_ACCEL_MIN * 256.0f);
+    int32_t factor, maxf, minf;
+    if (!g_scroll_accel_config.enabled) {
+        /* Curve acceleration disabled: plain 1:1 scroll at the base divisor. */
+        factor = 256;
+        maxf = minf = 256;
+    } else {
+        /* Generalised sigmoid acceleration with a sub-1 low-speed floor, matching the
+           drashna/pointing_device_accel form:
+              f = limit_upper - (limit_upper - limit) / (1 + e^(takeoff*(speed - offset)))^(growth_rate/takeoff)
+           growth_rate/takeoff (g/k) shapes how fast the curve climbs to limit_upper.
+           No kink; top reached at a finite speed. */
+        float ratio = g_scroll_accel_config.growth_rate / g_scroll_accel_config.takeoff;
+        float f = g_scroll_accel_config.limit_upper -
+                  (g_scroll_accel_config.limit_upper - g_scroll_accel_config.limit) /
+                      powf(1.0f + expf(g_scroll_accel_config.takeoff * (speed - g_scroll_accel_config.offset)), ratio);
+        factor = (int32_t)(f * 256.0f);
+        maxf = (int32_t)(g_scroll_accel_config.limit_upper * 256.0f);
+        minf = (int32_t)(g_scroll_accel_config.limit * 256.0f);
+    }
     if (factor > maxf) factor = maxf;
     if (factor < minf) factor = minf;
 
     /* Bresenham: residual += motion * factor; emit integer scrolls of
-       (base_div * 256) units each. Residual stays within [0, base_div*256). */
+       (base_div * 256) units each. Keep the residual SIGNED in (-D, D) via
+       truncating division -- a sub-tick nudge the other way only shifts the
+       signed residual, never emits a phantom tick. (Flooring a negative partial
+       down to -1, as Euclidean division does, made the wheel emit +/-1 every
+       tick at rest: the continuous post-scroll jitter.) */
+    int32_t D = (int32_t)base_div * 256;
     int32_t frac = *acc + (int32_t)delta * factor;
-    int32_t out32 = frac / ((int32_t)base_div * 256);
-    *acc = frac - out32 * ((int32_t)base_div * 256);
+    int32_t out32 = frac / D;
+    *acc = frac % D;
+    /* mouse_report.v / .h are int8_t; clamp to avoid HID wraparound on very fast
+       flicks (delta * factor can exceed 127 per tick). */
+    if (out32 > 127) {
+        out32 = 127;
+    } else if (out32 < -127) {
+        out32 = -127;
+    }
     return (int16_t)out32;
 }
 
@@ -757,4 +870,177 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
     }
 
     return mouse_report;
+}
+
+/* ===================================================================== *
+ *  VIA custom-value menu (channel 25).
+ *  Scroll-accel params (mid, k, min, max_boost; value ids 1..4) are edited
+ *  live from the VIA web UI and persisted in VIA's custom EEPROM region.
+ *  The gesture tap keycode (value id 5) is edited live too and persisted in
+ *  the regular user_config EEPROM. The web menu is aplus.json "menus".
+ * ===================================================================== */
+
+enum via_scroll_accel_channel {
+    id_scroll_accel = 25,
+};
+
+enum via_scroll_accel_ids {
+    id_scroll_accel_offset = 1,
+    id_scroll_accel_takeoff = 2,
+    id_scroll_accel_limit = 3,
+    id_scroll_accel_limit_upper = 4,
+    id_scroll_accel_gesture_tap_keycode = 5,
+    id_scroll_accel_enabled = 6,
+    id_scroll_accel_growth_rate = 7,
+};
+
+/* VIA sliders are uint16. To keep the web UI readable, each float param is
+   exposed in its natural units (scaled to an integer). The aplus.json "options"
+   ranges must match these integer ranges. The stored config stays in real float
+   units, so the per-param real ranges (SCROLL_ACCEL_R_*) used by the init guard
+   in keyboard_post_init_user are unchanged.
+      offset      : speed units,     scale x1    (UI 0..400)
+      takeoff     : steepness,       scale x1000 (UI 5..100    -> 0.005..0.1)
+      growth_rate : top saturation,  scale x1000 (UI 1..100    -> 0.001..0.1)
+      limit       : low-speed floor, scale x1000 (UI 500..1000 -> 0.5..1.0)
+      limit_upper : top multiplier,  scale x1    (UI 1..10) */
+#define SCROLL_ACCEL_UI_OFFSET_SCALE       1
+#define SCROLL_ACCEL_UI_TAKEOFF_SCALE      1000
+#define SCROLL_ACCEL_UI_GROWTH_RATE_SCALE  1000
+#define SCROLL_ACCEL_UI_LIMIT_SCALE        1000
+#define SCROLL_ACCEL_UI_LIMIT_UPPER_SCALE  1
+
+/* VIA encodes a `range` control as 2 big-endian bytes when its options max > 255,
+   otherwise as a single byte. Our controls: offset (max 400) and limit (max 1000) use
+   2-byte BE; takeoff (max 100), growth_rate (max 100) and limit_upper (max 10) use 1-byte;
+   enabled is a 1-byte toggle; gesture is a 2-byte
+   BE keycode. The get path mirrors this so the web UI reads values back correctly. */
+static void scroll_accel_config_set_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_scroll_accel_offset: {
+            uint16_t v = ((uint16_t)value_data[0] << 8) | value_data[1];
+            g_scroll_accel_config.offset = (float)v / SCROLL_ACCEL_UI_OFFSET_SCALE;
+            break;
+        }
+        case id_scroll_accel_takeoff: {
+            uint16_t v = value_data[0];
+            g_scroll_accel_config.takeoff = (float)v / SCROLL_ACCEL_UI_TAKEOFF_SCALE;
+            break;
+        }
+        case id_scroll_accel_limit: {
+            uint16_t v = ((uint16_t)value_data[0] << 8) | value_data[1];
+            g_scroll_accel_config.limit = (float)v / SCROLL_ACCEL_UI_LIMIT_SCALE;
+            break;
+        }
+        case id_scroll_accel_limit_upper: {
+            uint16_t v = value_data[0];
+            g_scroll_accel_config.limit_upper = (float)v / SCROLL_ACCEL_UI_LIMIT_UPPER_SCALE;
+            break;
+        }
+        case id_scroll_accel_growth_rate: {
+            uint16_t v = value_data[0];
+            g_scroll_accel_config.growth_rate = (float)v / SCROLL_ACCEL_UI_GROWTH_RATE_SCALE;
+            break;
+        }
+        case id_scroll_accel_enabled: {
+            g_scroll_accel_config.enabled = value_data[0] ? 1 : 0;
+            break;
+        }
+        case id_scroll_accel_gesture_tap_keycode: {
+            uint16_t kc = ((uint16_t)value_data[0] << 8) | value_data[1];
+            user_config.gesture_tap_keycode = kc;
+            break;
+        }
+    }
+
+    /* Persist immediately so a value change survives a reboot even if the host
+       does not follow up with an explicit id_custom_save. */
+    scroll_accel_config_update();
+    eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+}
+
+static void scroll_accel_config_get_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_scroll_accel_offset: {
+            uint16_t v = (uint16_t)(g_scroll_accel_config.offset * SCROLL_ACCEL_UI_OFFSET_SCALE);
+            value_data[0] = v >> 8;
+            value_data[1] = v & 0xFF;
+            break;
+        }
+        case id_scroll_accel_takeoff: {
+            uint16_t v = (uint16_t)(g_scroll_accel_config.takeoff * SCROLL_ACCEL_UI_TAKEOFF_SCALE);
+            value_data[0] = v & 0xFF;
+            value_data[1] = v >> 8;
+            break;
+        }
+        case id_scroll_accel_limit: {
+            uint16_t v = (uint16_t)(g_scroll_accel_config.limit * SCROLL_ACCEL_UI_LIMIT_SCALE);
+            value_data[0] = v >> 8;
+            value_data[1] = v & 0xFF;
+            break;
+        }
+        case id_scroll_accel_limit_upper: {
+            uint16_t v = (uint16_t)(g_scroll_accel_config.limit_upper * SCROLL_ACCEL_UI_LIMIT_UPPER_SCALE);
+            value_data[0] = v & 0xFF;
+            value_data[1] = v >> 8;
+            break;
+        }
+        case id_scroll_accel_growth_rate: {
+            uint16_t v = (uint16_t)(g_scroll_accel_config.growth_rate * SCROLL_ACCEL_UI_GROWTH_RATE_SCALE);
+            value_data[0] = v & 0xFF;
+            value_data[1] = v >> 8;
+            break;
+        }
+        case id_scroll_accel_enabled: {
+            value_data[0] = g_scroll_accel_config.enabled ? 1 : 0;
+            value_data[1] = 0;
+            break;
+        }
+        case id_scroll_accel_gesture_tap_keycode: {
+            uint16_t kc = user_config.gesture_tap_keycode;
+            value_data[0] = kc >> 8;
+            value_data[1] = kc & 0xFF;
+            break;
+        }
+    }
+}
+
+static void scroll_accel_config_update(void) {
+    eeconfig_update_user_datablock(&g_scroll_accel_config, SCROLL_ACCEL_EEPROM_OFFSET, sizeof(scroll_accel_config_t));
+}
+
+/* Keyboard-level handler for the scroll-accel custom channel. Unhandled channels
+   are passed back as id_unhandled (matches the core VIA dispatch contract). */
+void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
+    (void)length;  // VIA passes the packet length; we index by fixed offsets.
+    uint8_t *command_id = &(data[0]);
+    uint8_t *channel_id = &(data[1]);
+    uint8_t *value_and_data = &(data[2]);
+
+    if (*channel_id == id_scroll_accel) {
+        switch (*command_id) {
+            case id_custom_set_value:
+                scroll_accel_config_set_value(value_and_data);
+                break;
+            case id_custom_get_value:
+                scroll_accel_config_get_value(value_and_data);
+                break;
+            case id_custom_save:
+                scroll_accel_config_update();
+                eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+                break;
+            default:
+                *command_id = id_unhandled;
+                break;
+        }
+        return;
+    }
+
+    *command_id = id_unhandled;
 }
