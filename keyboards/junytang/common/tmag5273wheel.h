@@ -45,8 +45,8 @@
 /* This value determines how far apart scroll wheel "ticks" are when
    emulating low-res scrolling. Tick units are in fractions of
    TMAG5273_MAX_SENSOR_VALUE, which represents one physical revolution
-   of the wheel. 320 = 18 ticks per revolution (1.5x the original 480/12). */
-#define TMAG5273_LOWRES_TICK_SIZE 320
+   of the wheel. 240 = 24 ticks per revolution (2x the original 480/12). */
+#define TMAG5273_LOWRES_TICK_SIZE 240
 
 /* This value is the same as TMAG5273_LOWRES_TICK_SIZE but applies to
    when the wheel is used to send left/right arrow keypresses for

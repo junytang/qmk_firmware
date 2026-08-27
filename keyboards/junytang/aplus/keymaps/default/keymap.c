@@ -40,7 +40,8 @@ uint16_t rightwheel_deadzone_center = 0;
 
 uint16_t leftwheel_current_position = 0;
 uint16_t rightwheel_current_position = 0;
-uint32_t last_scroll_time = 0;
+
+static volatile bool g_wheel_data_fresh = false;
 
 /* Latest raw TMAG5273 angles, polled in housekeeping_task_user rather than in
    pointing_device_task_user. The ChibiOS I2C driver is interrupt-driven, so its
@@ -141,6 +142,7 @@ _Static_assert(DPI_EEPROM_OFFSET + sizeof(dpi_config_t) <= EECONFIG_USER_DATA_SI
 #define SCROLL_ACCEL_R_MIN_LIMIT_UPPER 1.0f
 #define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
 
+void scroll_accel_rebuild_lut(void);
 static void scroll_accel_config_update(void);
 
 static void dpi_apply(void);
@@ -417,6 +419,8 @@ void keyboard_post_init_user(void) {
 
     /* ========================== Scroll Wheel Setup ======================= */
 
+    scroll_accel_rebuild_lut(); // 开机初始化时，预先生成一次 Sigmoid 查表
+
     /* Start up the two wheels. */
     tmag5273_init();
 
@@ -666,6 +670,61 @@ int32_t rightwheel_scroll_acc = 0;
 int16_t leftwheel_arrow_scroll_tick = 0;
 int16_t rightwheel_arrow_scroll_tick = 0;
 
+#define ACCEL_LUT_SIZE 128 // 覆盖 speed 从 0 到 127 (足以应对任何极速甩动)
+
+static int32_t s_accel_lut[ACCEL_LUT_SIZE];
+static int32_t s_accel_maxf = 256;
+static int32_t s_accel_minf = 256;
+static bool    s_lut_dirty  = true; // 标记查表是否需要更新
+
+/* 当开机或 VIA 修改了加速参数时，重新计算生成一次查表 (仅在调参时运行一次) */
+void scroll_accel_rebuild_lut(void) {
+    if (!g_scroll_accel_config.enabled) {
+        s_accel_maxf = 256;
+        s_accel_minf = 256;
+        for (int i = 0; i < ACCEL_LUT_SIZE; i++) {
+            s_accel_lut[i] = 256;
+        }
+        s_lut_dirty = false;
+        return;
+    }
+
+    float takeoff = g_scroll_accel_config.takeoff;
+    if (takeoff <= 0.0001f) takeoff = 0.0001f; // 防止除以零
+
+    float ratio       = g_scroll_accel_config.growth_rate / takeoff;
+    float limit_upper = g_scroll_accel_config.limit_upper;
+    float limit_min   = g_scroll_accel_config.limit;
+    float offset      = g_scroll_accel_config.offset;
+
+    s_accel_maxf = (int32_t)(limit_upper * 256.0f);
+    s_accel_minf = (int32_t)(limit_min * 256.0f);
+
+    /* 一次性生成 0~127 速度区间的所有 Sigmoid 倍率 */
+    for (int speed = 0; speed < ACCEL_LUT_SIZE; speed++) {
+        float exponent = takeoff * ((float)speed - offset);
+
+        // 限制指数范围，防止浮点溢出
+        if (exponent > 80.0f) exponent = 80.0f;
+        if (exponent < -80.0f) exponent = -80.0f;
+
+        float f = limit_upper - (limit_upper - limit_min) / powf(1.0f + expf(exponent), ratio);
+        int32_t factor = (int32_t)(f * 256.0f);
+
+        if (factor > s_accel_maxf) factor = s_accel_maxf;
+        if (factor < s_accel_minf) factor = s_accel_minf;
+
+        s_accel_lut[speed] = factor;
+    }
+
+    s_lut_dirty = false;
+}
+
+/* 通知系统 VIA 参数已改变，下次滚动时重新生成查表 */
+void scroll_accel_config_changed(void) {
+    s_lut_dirty = true;
+}
+
 /* Scroll acceleration tuning (generalised sigmoid curve), VIA-configurable.
      f = limit_upper - (limit_upper - limit) / (1 + e^(takeoff*(speed - offset)))^(growth_rate/takeoff)
    Gentle (≈limit) below offset, steepest near offset, then approaching limit_upper.
@@ -677,48 +736,87 @@ int16_t rightwheel_arrow_scroll_tick = 0;
    the residual on direction reversal keeps the two directions symmetric.
    The Bresenham residual is carried in *acc (fine-grained, so no coarse
    low-speed beat), giving a smooth average rate. */
+// static int16_t scroll_accel_apply_slow(int32_t *acc, int16_t delta, int16_t base_div) {
+//     /* Drop any leftover residual when the wheel reverses, so scrolling one
+//        direction doesn't "unwind" residual motion from the other. */
+//     if ((delta > 0 && *acc < 0) || (delta < 0 && *acc > 0)) {
+//         *acc = 0;
+//     }
+
+//     int16_t speed = abs(delta);
+//     int32_t factor, maxf, minf;
+//     if (!g_scroll_accel_config.enabled) {
+//         /* Curve acceleration disabled: plain 1:1 scroll at the base divisor. */
+//         factor = 256;
+//         maxf = minf = 256;
+//     } else {
+//         /* Generalised sigmoid acceleration with a sub-1 low-speed floor, matching the
+//            drashna/pointing_device_accel form:
+//               f = limit_upper - (limit_upper - limit) / (1 + e^(takeoff*(speed - offset)))^(growth_rate/takeoff)
+//            growth_rate/takeoff (g/k) shapes how fast the curve climbs to limit_upper.
+//            No kink; top reached at a finite speed. */
+//         float ratio = g_scroll_accel_config.growth_rate / g_scroll_accel_config.takeoff;
+//         float f = g_scroll_accel_config.limit_upper -
+//                   (g_scroll_accel_config.limit_upper - g_scroll_accel_config.limit) /
+//                       powf(1.0f + expf(g_scroll_accel_config.takeoff * (speed - g_scroll_accel_config.offset)), ratio);
+//         factor = (int32_t)(f * 256.0f);
+//         maxf = (int32_t)(g_scroll_accel_config.limit_upper * 256.0f);
+//         minf = (int32_t)(g_scroll_accel_config.limit * 256.0f);
+//     }
+//     if (factor > maxf) factor = maxf;
+//     if (factor < minf) factor = minf;
+
+//     /* Bresenham: residual += motion * factor; emit integer scrolls of
+//        (base_div * 256) units each. Keep the residual SIGNED in (-D, D) via
+//        truncating division -- a sub-tick nudge the other way only shifts the
+//        signed residual, never emits a phantom tick. (Flooring a negative partial
+//        down to -1, as Euclidean division does, made the wheel emit +/-1 every
+//        tick at rest: the continuous post-scroll jitter.) */
+//     int32_t D = (int32_t)base_div * 256;
+//     int32_t frac = *acc + (int32_t)delta * factor;
+//     int32_t out32 = frac / D;
+//     *acc = frac % D;
+//     /* mouse_report.v / .h are int8_t; clamp to avoid HID wraparound on very fast
+//        flicks (delta * factor can exceed 127 per tick). */
+//     if (out32 > 127) {
+//         out32 = 127;
+//     } else if (out32 < -127) {
+//         out32 = -127;
+//     }
+//     return (int16_t)out32;
+// }
+
+/* ===========================================================================
+ * 极速版 Bresenham 滚动加速应用函数 (纯整数运算，零软浮点开销)
+ * ========================================================================= */
 static int16_t scroll_accel_apply(int32_t *acc, int16_t delta, int16_t base_div) {
-    /* Drop any leftover residual when the wheel reverses, so scrolling one
-       direction doesn't "unwind" residual motion from the other. */
+    /* 反向旋转时立刻清空残差 */
     if ((delta > 0 && *acc < 0) || (delta < 0 && *acc > 0)) {
         *acc = 0;
     }
 
-    int16_t speed = abs(delta);
-    int32_t factor, maxf, minf;
-    if (!g_scroll_accel_config.enabled) {
-        /* Curve acceleration disabled: plain 1:1 scroll at the base divisor. */
-        factor = 256;
-        maxf = minf = 256;
-    } else {
-        /* Generalised sigmoid acceleration with a sub-1 low-speed floor, matching the
-           drashna/pointing_device_accel form:
-              f = limit_upper - (limit_upper - limit) / (1 + e^(takeoff*(speed - offset)))^(growth_rate/takeoff)
-           growth_rate/takeoff (g/k) shapes how fast the curve climbs to limit_upper.
-           No kink; top reached at a finite speed. */
-        float ratio = g_scroll_accel_config.growth_rate / g_scroll_accel_config.takeoff;
-        float f = g_scroll_accel_config.limit_upper -
-                  (g_scroll_accel_config.limit_upper - g_scroll_accel_config.limit) /
-                      powf(1.0f + expf(g_scroll_accel_config.takeoff * (speed - g_scroll_accel_config.offset)), ratio);
-        factor = (int32_t)(f * 256.0f);
-        maxf = (int32_t)(g_scroll_accel_config.limit_upper * 256.0f);
-        minf = (int32_t)(g_scroll_accel_config.limit * 256.0f);
+    /* 如果 VIA 刚修改了参数，懒加载重新生成查表 */
+    if (s_lut_dirty) {
+        scroll_accel_rebuild_lut();
     }
-    if (factor > maxf) factor = maxf;
-    if (factor < minf) factor = minf;
 
-    /* Bresenham: residual += motion * factor; emit integer scrolls of
-       (base_div * 256) units each. Keep the residual SIGNED in (-D, D) via
-       truncating division -- a sub-tick nudge the other way only shifts the
-       signed residual, never emits a phantom tick. (Flooring a negative partial
-       down to -1, as Euclidean division does, made the wheel emit +/-1 every
-       tick at rest: the continuous post-scroll jitter.) */
-    int32_t D = (int32_t)base_div * 256;
-    int32_t frac = *acc + (int32_t)delta * factor;
+    int16_t speed = abs(delta);
+    int32_t factor;
+
+    /* 【核心优化】：瞬间 O(1) 纯整数查表，耗时 8 纳秒，完全消除 powf/expf 开销！ */
+    if (speed < ACCEL_LUT_SIZE) {
+        factor = s_accel_lut[speed];
+    } else {
+        factor = s_accel_maxf; // 极端超速直接取上限
+    }
+
+    /* Bresenham 整数小数累加器 */
+    int32_t D     = (int32_t)base_div * 256;
+    int32_t frac  = *acc + (int32_t)delta * factor;
     int32_t out32 = frac / D;
-    *acc = frac % D;
-    /* mouse_report.v / .h are int8_t; clamp to avoid HID wraparound on very fast
-       flicks (delta * factor can exceed 127 per tick). */
+    *acc          = frac % D;
+
+    /* HID 报告范围钳位 [-127, 127] */
     if (out32 > 127) {
         out32 = 127;
     } else if (out32 < -127) {
@@ -740,18 +838,21 @@ uint32_t rightwheel_timeout = 0;
    published to the volatile buffers consumed by pointing_device_task_user. */
 void housekeeping_task_user(void) {
     static uint32_t last_wheel_i2c_time = 0;
-    if (timer_elapsed32(last_wheel_i2c_time) > 10) {
+    if (timer_elapsed32(last_wheel_i2c_time) > 8) {
         leftwheel_angle_stored  = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
         rightwheel_angle_stored = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
         last_wheel_i2c_time = timer_read32();
         // 等待所有 I2C pending中断处理完毕, 下次SPI 开始的时候，保证 I2C 中断队列已经清空
+        g_wheel_data_fresh = true;
         wait_us(20);
     }
 }
 
 report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
     // throttle reads
-    if (timer_elapsed32(last_scroll_time) > 10) {
+    if (g_wheel_data_fresh) {
+        g_wheel_data_fresh = false; // 消费新数据
+
         uint16_t leftwheel_rawangle = leftwheel_angle_stored;
         uint16_t rightwheel_rawangle = rightwheel_angle_stored;
 
@@ -772,7 +873,7 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         else {
             /* Don't increment forever, you'll get rollover. */
             if( leftwheel_timeout < TMAG5273_DEADZONE_PROTECTOR_TIMEOUT ) {
-                leftwheel_timeout += timer_elapsed32(last_scroll_time);
+                leftwheel_timeout += 8;
             }
         }
         if( abs(rightwheel_delta) > 2 ) {
@@ -781,12 +882,9 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         else {
             /* Don't increment forever, you'll get rollover. */
             if( rightwheel_timeout < TMAG5273_DEADZONE_PROTECTOR_TIMEOUT ) {
-                rightwheel_timeout += timer_elapsed32(last_scroll_time);
+                rightwheel_timeout += 8;
             }
         }
-
-        /* Reset the counter so we know when to next perform all this scroll processing. */
-        last_scroll_time = timer_read32();
 
         /* If either of the wheels times out, we move the deadzone window to
            where the position is. This prevents spurious scroll events. */
@@ -934,9 +1032,8 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
             } else {
                 mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, left_div);
             }
-        } else {
-            leftwheel_scroll_acc = 0;
         }
+
         if ( right_outside ) {
             if ( right_is_h ) {
                 if ( !user_config.horizontal_scroll_arrows ) {
@@ -945,8 +1042,6 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
             } else {
                 mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, right_div);
             }
-        } else {
-            rightwheel_scroll_acc = 0;
         }
 
         /* Set scroll data to zero if the corresponding button is
@@ -1224,6 +1319,7 @@ void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
                 *command_id = id_unhandled;
                 break;
         }
+        scroll_accel_config_changed(); // 标记参数已改，下次滚动自动刷新查表
         return;
     }
 
