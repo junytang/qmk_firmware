@@ -74,7 +74,7 @@
   },
   "menus": [
     {
-      "label": "Scroll Acceleration",
+      "label": "Settings",
       "content": [
         {
           "label": "Scroll Tuning",
@@ -121,6 +121,47 @@
                "label": "Gesture tap keycode",
                "type": "keycode"
              }
+          ]
+        },
+        {
+          "label": "DPI Config",
+          "content": [
+            {
+              "content": ["id_dpi_activepreset", 26, 1],
+              "label": "Active DPI preset (0-4)",
+              "options": [0, 4],
+              "type": "range"
+            },
+            {
+              "content": ["id_dpi_preset0", 26, 2],
+              "label": "Preset 1 DPI",
+              "options": [100, 3200],
+              "type": "range"
+            },
+            {
+              "content": ["id_dpi_preset1", 26, 3],
+              "label": "Preset 2 DPI",
+              "options": [100, 3200],
+              "type": "range"
+            },
+            {
+              "content": ["id_dpi_preset2", 26, 4],
+              "label": "Preset 3 DPI",
+              "options": [100, 3200],
+              "type": "range"
+            },
+            {
+              "content": ["id_dpi_preset3", 26, 5],
+              "label": "Preset 4 DPI",
+              "options": [100, 3200],
+              "type": "range"
+            },
+            {
+              "content": ["id_dpi_preset4", 26, 6],
+              "label": "Preset 5 DPI",
+              "options": [100, 3200],
+              "type": "range"
+            }
           ]
         }
       ]

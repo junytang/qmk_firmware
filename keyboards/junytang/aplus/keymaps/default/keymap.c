@@ -77,6 +77,13 @@ typedef struct {
     float limit_upper;  /* top scroll-rate multiplier vs the base divisor. Mirrors accel LIMIT_UPPER. */
 } scroll_accel_config_t;
 
+/* DPI config: 5 user-settable presets plus the currently-active preset index.
+   Stored raw (actual CPI values), exposed to the web UI as real DPI numbers. */
+typedef struct {
+    uint16_t presets[5];
+    uint8_t  active_preset;
+} dpi_config_t;
+
 scroll_accel_config_t g_scroll_accel_config = {
     .enabled = 1,
     .offset = 160.0f,
@@ -84,6 +91,11 @@ scroll_accel_config_t g_scroll_accel_config = {
     .growth_rate = 0.03f,
     .limit = 1.0f,
     .limit_upper = 4.0f,
+};
+
+dpi_config_t g_dpi_config = {
+    .presets = { 600, 1000, 1400, 1800, 2400 },
+    .active_preset = 1,
 };
 
 /* Both persistent structs live in the EECONFIG user-data block
@@ -96,8 +108,11 @@ scroll_accel_config_t g_scroll_accel_config = {
    region, so it does not collide with the drashna/pointing_device_accel module. */
 #define USER_CONFIG_EEPROM_OFFSET 0
 #define SCROLL_ACCEL_EEPROM_OFFSET (USER_CONFIG_EEPROM_OFFSET + sizeof(user_config_t))
+#define DPI_EEPROM_OFFSET (SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t))
 _Static_assert(SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
+_Static_assert(DPI_EEPROM_OFFSET + sizeof(dpi_config_t) <= EECONFIG_USER_DATA_SIZE,
+                "user_config + scroll_accel_config + dpi_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 
 /* Per-param real ranges for VIA projection (must match aplus.json "options"). */
 #define SCROLL_ACCEL_R_MIN_OFFSET 0.0f
@@ -112,6 +127,11 @@ _Static_assert(SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t) <= EEC
 #define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
 
 static void scroll_accel_config_update(void);
+
+static void dpi_apply(void);
+static void dpi_config_update(void);
+static void dpi_config_set_value(uint8_t *data);
+static void dpi_config_get_value(uint8_t *data);
 
 /* Add custom keycodes for control layer. */
 enum my_keycodes {
@@ -328,6 +348,13 @@ void eeconfig_init_user(void) {
         .limit_upper = 4.0f,
     };
     scroll_accel_config_update();
+
+    /* Seed DPI presets + active preset into the EECONFIG user-data block too. */
+    g_dpi_config = (dpi_config_t){
+        .presets = { 600, 1000, 1400, 1800, 2400 },
+        .active_preset = 1,
+    };
+    dpi_config_update();
 }
 
 void keyboard_pre_init_user(void) {
@@ -420,6 +447,21 @@ void keyboard_post_init_user(void) {
         };
         scroll_accel_config_update();
     }
+
+    /* Load DPI presets/active preset from the EECONFIG user-data block. Reseed
+       defaults if it was never written (all-zero) or is corrupt (active >= 5). */
+    eeconfig_read_user_datablock(&g_dpi_config, DPI_EEPROM_OFFSET, sizeof(dpi_config_t));
+    if (g_dpi_config.active_preset >= 5 ||
+        (g_dpi_config.presets[0] == 0 && g_dpi_config.presets[1] == 0 &&
+         g_dpi_config.presets[2] == 0 && g_dpi_config.presets[3] == 0 &&
+         g_dpi_config.presets[4] == 0)) {
+        g_dpi_config = (dpi_config_t){
+            .presets = { 600, 1000, 1400, 1800, 2400 },
+            .active_preset = 1,
+        };
+        dpi_config_update();
+    }
+    dpi_apply();
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
@@ -894,6 +936,26 @@ enum via_scroll_accel_ids {
     id_scroll_accel_growth_rate = 7,
 };
 
+/* Separate VIA channel for DPI so it never mixes with the scroll UI. The web
+   UI (aplus.json "menus") drives it with channel 26 and the value ids below. */
+enum via_dpi_channel {
+    id_dpi = 26,
+};
+
+enum via_dpi_ids {
+    id_dpi_activepreset = 1,
+    id_dpi_preset0 = 2,
+    id_dpi_preset1 = 3,
+    id_dpi_preset2 = 4,
+    id_dpi_preset3 = 5,
+    id_dpi_preset4 = 6,
+};
+
+/* DPI presets exposed to the web UI as real CPI values. The active preset
+   index is 0..4; the five preset controls are plain uint16 ranges. */
+#define DPI_UI_MIN_PRESET 100
+#define DPI_UI_MAX_PRESET 3200
+
 /* VIA sliders are uint16. To keep the web UI readable, each float param is
    exposed in its natural units (scaled to an integer). The aplus.json "options"
    ranges must match these integer ranges. The stored config stays in real float
@@ -1015,6 +1077,67 @@ static void scroll_accel_config_update(void) {
     eeconfig_update_user_datablock(&g_scroll_accel_config, SCROLL_ACCEL_EEPROM_OFFSET, sizeof(scroll_accel_config_t));
 }
 
+static void dpi_apply(void) {
+    if (g_dpi_config.active_preset >= 5) g_dpi_config.active_preset = 0;
+    pointing_device_set_cpi(g_dpi_config.presets[g_dpi_config.active_preset]);
+}
+
+static void dpi_config_update(void) {
+    eeconfig_update_user_datablock(&g_dpi_config, DPI_EEPROM_OFFSET, sizeof(dpi_config_t));
+}
+
+static void dpi_config_set_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_dpi_activepreset: {
+            g_dpi_config.active_preset = (value_data[0] < 5) ? value_data[0] : 4;
+            dpi_apply();
+            break;
+        }
+        case id_dpi_preset0:
+        case id_dpi_preset1:
+        case id_dpi_preset2:
+        case id_dpi_preset3:
+        case id_dpi_preset4: {
+            uint8_t idx = (uint8_t)(*value_id - id_dpi_preset0);
+            uint16_t v = ((uint16_t)value_data[0] << 8) | value_data[1];
+            g_dpi_config.presets[idx] = v;
+            dpi_apply();
+            break;
+        }
+    }
+
+    /* Persist immediately so a value change survives a reboot even if the host
+       does not follow up with an explicit id_custom_save. */
+    dpi_config_update();
+}
+
+static void dpi_config_get_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_dpi_activepreset: {
+            value_data[0] = g_dpi_config.active_preset;
+            value_data[1] = 0;
+            break;
+        }
+        case id_dpi_preset0:
+        case id_dpi_preset1:
+        case id_dpi_preset2:
+        case id_dpi_preset3:
+        case id_dpi_preset4: {
+            uint8_t idx = (uint8_t)(*value_id - id_dpi_preset0);
+            uint16_t v = g_dpi_config.presets[idx];
+            value_data[0] = v >> 8;
+            value_data[1] = v & 0xFF;
+            break;
+        }
+    }
+}
+
 /* Keyboard-level handler for the scroll-accel custom channel. Unhandled channels
    are passed back as id_unhandled (matches the core VIA dispatch contract). */
 void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
@@ -1034,6 +1157,24 @@ void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
             case id_custom_save:
                 scroll_accel_config_update();
                 eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+                break;
+            default:
+                *command_id = id_unhandled;
+                break;
+        }
+        return;
+    }
+
+    if (*channel_id == id_dpi) {
+        switch (*command_id) {
+            case id_custom_set_value:
+                dpi_config_set_value(value_and_data);
+                break;
+            case id_custom_get_value:
+                dpi_config_get_value(value_and_data);
+                break;
+            case id_custom_save:
+                dpi_config_update();
                 break;
             default:
                 *command_id = id_unhandled;
