@@ -21,8 +21,26 @@
 #include "printf.h"
 #include "tmag5273wheel.h"
 
+/* Switch the I2C backend. With USE_SOFT_I2C (set by SOFT_I2C_DRIVER = yes in
+   rules.mk) we use the polled, hang-free bit-bang driver; otherwise the
+   hardware I2C driver. All TMAG I/O below goes through tmag_i2c_*. */
+#ifdef USE_SOFT_I2C
+    #include "soft_i2c.h"
+    #define tmag_i2c_init()      soft_i2c_init()
+    #define tmag_i2c_ping(a, t)  soft_i2c_ping_address((a), (t))
+    #define tmag_i2c_write_reg   soft_i2c_write_register
+    #define tmag_i2c_read_reg    soft_i2c_read_register
+    #define tmag_i2c_recover()   soft_i2c_recover()
+#else
+    #define tmag_i2c_init()      i2c_init()
+    #define tmag_i2c_ping(a, t)  i2c_ping_address((a), (t))
+    #define tmag_i2c_write_reg   i2c_write_register
+    #define tmag_i2c_read_reg    i2c_read_register
+    #define tmag_i2c_recover()   do {} while (0)
+#endif
+
 void tmag5273_init(void) {
-    i2c_init();
+    tmag_i2c_init();
 }
 
 // Finds a TMAG5273 device on the I2C bus, and initializes it.
@@ -31,22 +49,24 @@ void tmag5273_init(void) {
 void tmag5273_init_device(uint8_t device_addr) {
     uint16_t addr;
 
-    if (i2c_ping_address(TMAG5273A1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
+    if (tmag_i2c_ping(TMAG5273A1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
         addr = TMAG5273A1_I2C_ADDRESS;
-    } else if (i2c_ping_address(TMAG5273B1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
+    } else if (tmag_i2c_ping(TMAG5273B1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
         addr = TMAG5273B1_I2C_ADDRESS;
-    } else if (i2c_ping_address(TMAG5273C1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
+    } else if (tmag_i2c_ping(TMAG5273C1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
         addr = TMAG5273C1_I2C_ADDRESS;
-    } else if (i2c_ping_address(TMAG5273D1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
+    } else if (tmag_i2c_ping(TMAG5273D1_I2C_ADDRESS, 100) == I2C_STATUS_SUCCESS) {
         addr = TMAG5273D1_I2C_ADDRESS;
     } else {
-        // printf("No TMAG5273 device found; exiting\n");
-        exit(1);
+        // No TMAG5273 device found on the bus; bail out gracefully instead of
+        // calling exit(1) (which would brick the board). The wheel simply won't
+        // report until a device appears.
+        return;
     }
 
     // Give found device a new device address
     uint8_t i2c_address = device_addr | 0x1;
-    i2c_write_register(addr, REG_I2C_ADDRESS, &i2c_address, 1, 20);
+    tmag_i2c_write_reg(addr, REG_I2C_ADDRESS, &i2c_address, 1, 20);
 
     // 32x oversampling
     uint8_t device_config_1 = 0b101 << 2;
@@ -64,18 +84,45 @@ void tmag5273_init_device(uint8_t device_addr) {
 
     uint8_t int_config = 0x1;
 
-    i2c_write_register(device_addr, REG_DEVICE_CONFIG_1, &device_config_1, 1, 20);
-    i2c_write_register(device_addr, REG_DEVICE_CONFIG_2, &device_config_2, 1, 20);
-    i2c_write_register(device_addr, REG_SENSOR_CONFIG_1, &sensor_config_1, 1, 20);
-    i2c_write_register(device_addr, REG_SENSOR_CONFIG_2, &sensor_config_2, 1, 20);
-    i2c_write_register(device_addr, REG_INT_CONFIG_1, &int_config, 1, 100);
+    tmag_i2c_write_reg(device_addr, REG_DEVICE_CONFIG_1, &device_config_1, 1, 20);
+    tmag_i2c_write_reg(device_addr, REG_DEVICE_CONFIG_2, &device_config_2, 1, 20);
+    tmag_i2c_write_reg(device_addr, REG_SENSOR_CONFIG_1, &sensor_config_1, 1, 20);
+    tmag_i2c_write_reg(device_addr, REG_SENSOR_CONFIG_2, &sensor_config_2, 1, 20);
+    tmag_i2c_write_reg(device_addr, REG_INT_CONFIG_1, &int_config, 1, 100);
 }
 
 uint16_t tmag5273_get_angle(uint8_t device_addr) {
+    /* Cache one last-good reading per device so a transient I2C error feeds
+       the previous value instead of garbage, and so we only attempt bus
+       recovery once we've actually talked to the device. Keyed by address so
+       the driver stays generic for any number of wheels. */
+    static uint8_t  cache_addr[2] = { 0, 0 };
+    static uint16_t cache_val[2]  = { 0, 0 };
+    static uint8_t  fail_count    = 0;
+    static bool     ever_ok        = false;
+
+    int idx = 0;
+    for (int i = 0; i < 2; i++) {
+        if (cache_addr[i] == device_addr) { idx = i; break; }
+        if (cache_addr[i] == 0)            { cache_addr[i] = device_addr; idx = i; break; }
+    }
+
     uint8_t data[2];
-    i2c_read_register(device_addr, REG_ANGLE_RESULT_MSB, data, 2, 20);
-    uint16_t rawangle = (data[0] << 8) | data[1];
-    //printf("Angle: %d\n", rawangle);
+    i2c_status_t st = tmag_i2c_read_reg(device_addr, REG_ANGLE_RESULT_MSB, data, 2, 20);
+    if (st != I2C_STATUS_SUCCESS) {
+        /* On a glitchy bus, attempt recovery -- but only if we've ever talked
+           to a device, so we don't spam recovery when one is simply absent. */
+        if (ever_ok && ++fail_count >= 3) {
+            tmag_i2c_recover();
+            fail_count = 0;
+        }
+        return cache_val[idx];
+    }
+
+    ever_ok    = true;
+    fail_count = 0;
+    uint16_t rawangle = (uint16_t)((data[0] << 8) | data[1]);
+    cache_val[idx] = rawangle;
     return rawangle;
 }
 

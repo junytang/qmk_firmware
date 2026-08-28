@@ -24,12 +24,7 @@
 #include "printf.h"
 
 #include "../../../common/tmag5273wheel.h"
-/* pmw33xx_init()/pmw33xx_check_signature() are linked from the pmw33xx sensor
-   driver (POINTING_DEVICE_DRIVER = pmw3360) but its header
-   (drivers/sensors/pmw33xx_common.h) is not on the keymap include path. Declare
-   the symbols we need locally instead of patching QMK core. */
-extern bool pmw33xx_init(uint8_t sensor);
-extern bool pmw33xx_check_signature(uint8_t sensor);
+
 #include "pointing_device_gestures.h"
 
 #include "math.h"
@@ -384,29 +379,6 @@ void keyboard_pre_init_user(void) {
 
 }
 
-/* PMW3360 watchdog: a dedicated low-priority thread periodically checks whether
-   the sensor still responds. Its SPI read can very rarely wedge (timing collision
-   with the TMAG5273 I2C that trident, which has no TMAG5273, never hits),
-   freezing the pointer until a power cycle. If it stops responding, soft-reinit
-   it via SPI. Kept on an isolated thread so a wedged SPI read here can never
-   stall the main loop / pointer + keyboard handling. */
-static THD_WORKING_AREA(wa_pmw_wd_thread, 512);
-static THD_FUNCTION(pmw_wd_worker, arg) {
-    (void)arg;
-    chRegSetThreadName("pmw3360_wd");
-    uint32_t wd_count = 0;
-    while (true) {
-        chThdSleepMilliseconds(50);
-        if (++wd_count >= 60) { /* ~3s */
-            wd_count = 0;
-            if (!pmw33xx_check_signature(0)) {
-                pmw33xx_init(0);
-                dpi_apply();
-            }
-        }
-    }
-}
-
 void keyboard_post_init_user(void) {
     /* ============================ Debug Setup ============================ */
 
@@ -509,8 +481,8 @@ void keyboard_post_init_user(void) {
     }
     dpi_apply();
 
-    /* Launch the PMW3360 watchdog on an isolated low-priority thread. */
-    chThdCreateStatic(wa_pmw_wd_thread, sizeof(wa_pmw_wd_thread), LOWPRIO, pmw_wd_worker, NULL);
+    // /* Launch the PMW3360 watchdog on an isolated low-priority thread. */
+    // chThdCreateStatic(wa_pmw_wd_thread, sizeof(wa_pmw_wd_thread), LOWPRIO, pmw_wd_worker, NULL);
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
