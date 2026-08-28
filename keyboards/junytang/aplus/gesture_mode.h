@@ -35,12 +35,30 @@ typedef union {
 
 extern user_config_t user_config;
 
-/* Single tap-dance gesture trigger: tap sends user_config.gesture_tap_keycode,
- * hold engages a pointing-device gesture. Place TD_GESTURE at any VIA position. */
+/* Layer indices, shared so gesture_mode.c can reference LAYER_CONTROL. */
 enum {
-    TD_GESTURE = 0,
+    LAYER_NAV_RIGHT_HANDED = 0,
+    LAYER_NAV_LEFT_HANDED,
+    LAYER_CONTROL
 };
 
-void gesturetd_press(tap_dance_state_t *state, void *user_data);
-void gesturetd_fin(tap_dance_state_t *state, void *user_data);
-void gesturetd_rst(tap_dance_state_t *state, void *user_data);
+/* 3-in-1 control/gesture key (TD_CONTROL_GESTURE): tap = the configurable
+ * gesture_tap_keycode (MS_BTN7 default, VIA-settable), hold = MO(LAYER_CONTROL),
+ * tap+hold (double-tap) = pointing-device gesture mode. */
+enum {
+    TD_CONTROL_GESTURE = 0,
+};
+
+enum {
+    SINGLE_TAP = 1,
+    SINGLE_HOLD = 2,
+    DOUBLE_TAP = 3,
+    DOUBLE_HOLD = 4,
+    DOUBLE_SINGLE_TAP = 5, //send two single taps
+    TRIPLE_TAP = 6,
+    TRIPLE_HOLD = 7
+};
+
+void cg_press(tap_dance_state_t *state, void *user_data);
+void cg_fin(tap_dance_state_t *state, void *user_data);
+void cg_rst(tap_dance_state_t *state, void *user_data);

@@ -15,9 +15,7 @@
  */
 
 #include <stdint.h>
-#include <math.h>
 #include <stdbool.h>
-#include <stdlib.h>
 #include "printf.h"
 #include "tmag5273wheel.h"
 

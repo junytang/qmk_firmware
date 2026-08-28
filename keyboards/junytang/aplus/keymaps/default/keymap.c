@@ -39,11 +39,10 @@ uint16_t rightwheel_current_position = 0;
 static volatile bool g_wheel_data_fresh = false;
 
 /* Latest raw TMAG5273 angles, polled in housekeeping_task_user rather than in
-   pointing_device_task_user. The ChibiOS I2C driver is interrupt-driven, so its
-   completion IRQ used to land during the PMW3360 SPI read (which runs earlier,
-   inside pointing_device_driver->get_report) and wedge the sensor. Polling here
-   means the I2C transaction and its completion IRQ are fully serviced before the
-   SPI read ever runs, so they can no longer preempt it. */
+   pointing_device_task_user. The wheel reads use a slow, blocking (polled) soft
+   I2C transaction; doing them inline with the PMW3360 SPI read would delay the
+   pointer, and a glitchy bus could starve it. Polling here at a bounded rate and
+   publishing to these volatile buffers keeps the wheel reads off the SPI path. */
 static volatile uint16_t leftwheel_angle_stored  = 0;
 static volatile uint16_t rightwheel_angle_stored = 0;
 
@@ -157,12 +156,12 @@ enum my_keycodes {
   PKC_BLINKY_DPI_CONFIG
 };
 
-/* Layer names. */
-enum {
-    LAYER_NAV_RIGHT_HANDED = 0,
-    LAYER_NAV_LEFT_HANDED,
-    LAYER_CONTROL
-};
+// /* Layer names. Declared in gesture_mode.h  */
+// enum {
+//     LAYER_NAV_RIGHT_HANDED = 0,
+//     LAYER_NAV_LEFT_HANDED,
+//     LAYER_CONTROL
+// };
 
 /* Override default function in submodule code so that we can blink whenever
    a successful gesture is registered. */
@@ -267,13 +266,13 @@ const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
         // Base layer with all of the mouse-related stuff for everyday use.
         [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN6, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN4,
                                         MS_BTN1, MS_BTN3,
-                                        TD(TD_GESTURE), MO(LAYER_CONTROL) ),
+                                        MS_BTN2, TD(TD_CONTROL_GESTURE) ),
         // Mirror-image of right-handed layout for lefties.
         [LAYER_NAV_LEFT_HANDED] = LAYOUT(   LT(3, MS_BTN4), PKC_DRAG_SCROLL, MS_BTN5, MS_BTN6,
                                         MS_BTN3, MS_BTN1,
-                                        MO(LAYER_CONTROL), TD(TD_GESTURE) ),
-        // (Layer 7 is intentionally left as a transparent spare; the gesture
-        //  button is now TD_GESTURE: tap = gesture_tap_keycode, hold = gesture.)
+                                        TD(TD_CONTROL_GESTURE), MS_BTN2 ),
+    // (The control/gesture button is now the 3-in-1 TD_CONTROL_GESTURE: tap = gesture_tap_keycode
+    //  (MS_BTN7 default), hold = MO(LAYER_CONTROL), tap+hold = gesture.)
     // Layer for all of the customization options.
     [LAYER_CONTROL] = LAYOUT(           PKC_BLINKY_DPI_CONFIG, PKC_ADJUST_LED_BRIGHTNESS, PKC_TGL_VERT_SCRL, PKC_TGL_HORIZ_SCRL,
                                         PKC_TGL_MIRROR, PKC_TGL_DRAG_SCRL,
@@ -285,14 +284,15 @@ const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
     [7] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ )
 };
 
-/* Single tap-dance gesture trigger: tap sends user_config.gesture_tap_keycode,
- * hold engages a pointing-device gesture. Defined here (not gesture_mode.c) so
- * QMK's keymap introspection, which includes this file, can see it. */
+/* 3-in-1 control/gesture key (TD_CONTROL_GESTURE), defined in gesture_mode.c:
+ *   single tap    -> user_config.gesture_tap_keycode (MS_BTN7 default, VIA-settable)
+ *   single hold   -> MO(LAYER_CONTROL) for the duration of the hold
+ *   tap then hold -> pointing-device gesture mode */
 tap_dance_action_t tap_dance_actions[] = {
-    [TD_GESTURE] = { .fn = { .on_each_tap       = gesturetd_press,
-                             .on_dance_finished = gesturetd_fin,
-                             .on_reset          = gesturetd_rst },
-                     .user_data = (void *)&user_config.gesture_tap_keycode },
+    [TD_CONTROL_GESTURE] = { .fn = { .on_each_tap       = cg_press,
+                                     .on_dance_finished = cg_fin,
+                                     .on_reset          = cg_rst },
+                              .user_data = (void *)&user_config.gesture_tap_keycode },
 };
 
 /* Called whenever layers are modified. */
@@ -329,8 +329,6 @@ layer_state_t layer_state_set_user(layer_state_t state) {
             break;
     }
 
-    /* Gesture mode is driven by the TD_GESTURE tap-dance, not a layer. */
-
     return state;
 }
 
@@ -344,7 +342,7 @@ void eeconfig_init_user(void) {
     user_config.vertical_scroll_arrows = false;     // False = Scroll events, True = up/down arrows.
     user_config.drag_scroll_mode = false;           // Hold to activate.
     user_config.led_brightness = 4;                 // Brightest mode by default.
-    user_config.gesture_tap_keycode = MS_BTN2;    // Tap of the gesture key.
+    user_config.gesture_tap_keycode = MS_BTN7;    // Tap of the gesture key.
 
     eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
 
@@ -431,7 +429,7 @@ void keyboard_post_init_user(void) {
         user_config.vertical_scroll_arrows = false;
         user_config.drag_scroll_mode = false;
         user_config.led_brightness = 4;
-        user_config.gesture_tap_keycode = MS_BTN2;
+        user_config.gesture_tap_keycode = MS_BTN7;
         eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
     }
 
@@ -480,9 +478,6 @@ void keyboard_post_init_user(void) {
         dpi_config_update();
     }
     dpi_apply();
-
-    // /* Launch the PMW3360 watchdog on an isolated low-priority thread. */
-    // chThdCreateStatic(wa_pmw_wd_thread, sizeof(wa_pmw_wd_thread), LOWPRIO, pmw_wd_worker, NULL);
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
@@ -625,7 +620,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
     }
 }
 
-/* LED feedback for the tap/hold MS_BTN2 <-> gesture key (gesture_mode.c).
+/* LED feedback for the gesture mode triggered by the TD_CONTROL_GESTURE key.
    Mirrors the lighting used by PKC_GESTURE. */
 void gesture_mode_led_on(void) {
     rgblight_set_layer_state(GESTURE_LAYER_COLOUR, true);
@@ -804,20 +799,18 @@ int16_t rightwheel_volume_scroll_tick = 0;
 uint32_t leftwheel_timeout = 0;
 uint32_t rightwheel_timeout = 0;
 
-/* Poll the TMAG5273 wheels out of pointing_device_task_user so the interrupt-
-   driven I2C transaction (and its completion IRQ) is fully serviced here, before
-   the PMW3360 SPI read runs inside pointing_device_driver->get_report. This
-   removes the IRQ preemption that used to wedge the sensor. Angle values are
-   published to the volatile buffers consumed by pointing_device_task_user. */
+/* Poll the TMAG5273 wheels here (not in pointing_device_task_user). The soft
+   I2C driver is blocking, so doing it inline with the PMW3360 SPI read would
+   delay the pointer and a glitchy/stuck bus could starve it. We poll at a
+   bounded rate and publish to the volatile buffers consumed by
+   pointing_device_task_user. */
 void housekeeping_task_user(void) {
     static uint32_t last_wheel_i2c_time = 0;
     if (timer_elapsed32(last_wheel_i2c_time) > 8) {
         leftwheel_angle_stored  = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
         rightwheel_angle_stored = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
         last_wheel_i2c_time = timer_read32();
-        // 等待所有 I2C pending中断处理完毕, 下次SPI 开始的时候，保证 I2C 中断队列已经清空
         g_wheel_data_fresh = true;
-        wait_us(20);
     }
 }
 

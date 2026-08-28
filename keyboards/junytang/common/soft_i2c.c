@@ -43,7 +43,7 @@ static bool scl_wait_high(void) {
             soft_i2c_blocked_until = timer_read32() + SOFT_I2C_BACKOFF_MS;
             return false;
         }
-        wait_us(1); // 每次等 1 微秒，精确控制微秒级超时
+        wait_us(1); /* poll at ~1us granularity */
     }
     return true;
 }
@@ -199,7 +199,7 @@ void soft_i2c_recover(void) {
         uint16_t timeout = SOFT_I2C_RECOVER_TIMEOUT_US;
         while (!scl_read()) {
             if (--timeout == 0) break;
-            wait_us(1); // 每次等 1 微秒，精确控制微秒级超时
+            wait_us(1); /* poll at ~1us granularity */
         }
         i2c_delay();
     }
@@ -209,7 +209,7 @@ void soft_i2c_recover(void) {
     uint16_t timeout = SOFT_I2C_RECOVER_TIMEOUT_US;
     while (!scl_read()) {
         if (--timeout == 0) break;
-        wait_us(1); // 每次等 1 微秒，精确控制微秒级超时
+        wait_us(1); /* poll at ~1us granularity */
     }
     i2c_delay();
     sda_high();
