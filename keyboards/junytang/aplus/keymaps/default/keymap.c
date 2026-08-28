@@ -806,7 +806,7 @@ uint32_t rightwheel_timeout = 0;
    pointing_device_task_user. */
 void housekeeping_task_user(void) {
     static uint32_t last_wheel_i2c_time = 0;
-    if (timer_elapsed32(last_wheel_i2c_time) > 8) {
+        if (timer_elapsed32(last_wheel_i2c_time) > 20) {
         leftwheel_angle_stored  = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
         rightwheel_angle_stored = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
         last_wheel_i2c_time = timer_read32();

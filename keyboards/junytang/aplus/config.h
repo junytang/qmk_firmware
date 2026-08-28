@@ -62,9 +62,6 @@
 #define I2C1_SDA_PIN GP6
 #define I2C1_SCL_PIN GP7
 
-/* Increase I2C speed to 400 KHz */
-#define F_SCL 400000L
-
 // #define TMAG5273_D0_PWR_PIN GP27
 // #define TMAG5273_D1_PWR_PIN GP14
 #define TMAG5273_D0_PWR_PIN GP26
