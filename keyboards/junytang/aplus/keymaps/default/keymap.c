@@ -104,7 +104,7 @@ scroll_accel_config_t g_scroll_accel_config = {
 };
 
 dpi_config_t g_dpi_config = {
-    .presets = { 600, 1000, 1400, 1800, 2400 },
+    .presets = { 800, 1200, 1600, 2000, 2400 },
     .active_preset = 1,
 };
 
@@ -361,7 +361,7 @@ void eeconfig_init_user(void) {
 
     /* Seed DPI presets + active preset into the EECONFIG user-data block too. */
     g_dpi_config = (dpi_config_t){
-        .presets = { 600, 1000, 1400, 1800, 2400 },
+        .presets = { 800, 1200, 1600, 2000, 2400 },
         .active_preset = 1,
     };
     dpi_config_update();
@@ -472,7 +472,7 @@ void keyboard_post_init_user(void) {
          g_dpi_config.presets[2] == 0 && g_dpi_config.presets[3] == 0 &&
          g_dpi_config.presets[4] == 0)) {
         g_dpi_config = (dpi_config_t){
-            .presets = { 600, 1000, 1400, 1800, 2400 },
+            .presets = { 800, 1200, 1600, 2000, 2400 },
             .active_preset = 1,
         };
         dpi_config_update();

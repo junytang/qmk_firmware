@@ -66,8 +66,10 @@ void tmag5273_init_device(uint8_t device_addr) {
     uint8_t i2c_address = device_addr | 0x1;
     tmag_i2c_write_reg(addr, REG_I2C_ADDRESS, &i2c_address, 1, 20);
 
-    // 32x oversampling
-    uint8_t device_config_1 = 0b101 << 2;
+    // // 32x oversampling
+    // uint8_t device_config_1 = 0b101 << 2;
+    // 16x oversampling
+    uint8_t device_config_1 = 0b100 << 2;
 
     // Low noise mode
     // Operating Mode: Continuous Measure Mode

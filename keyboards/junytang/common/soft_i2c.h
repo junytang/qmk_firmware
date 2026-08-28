@@ -38,11 +38,15 @@
 #endif
 
 /* Max time (us) to wait for SCL to rise on each clock. This is the clock-
-   stretching tolerance: it must be long enough that a TMAG5273 stretching
-   during a conversion finishes instead of us aborting mid-transfer (which is
-   what wedges the slave). Only past this do we declare the bus stuck. */
+    stretching tolerance: it must be long enough that a TMAG5273 stretching
+    during a conversion finishes instead of us aborting mid-transfer (which is
+    what wedges the slave). Only past this do we declare the bus stuck. Keep it
+    as small as the sensor's normal stretch allows: a longer value only makes a
+    rare bus fault stall the main loop (and thus freeze the pointer) for longer.
+    5000us comfortably exceeds the TMAG5273's normal stretch at 32x oversampling
+    while bounding any fault to a few ms instead of tens of ms. */
 #ifndef SOFT_I2C_TIMEOUT_US
-    #define SOFT_I2C_TIMEOUT_US 10000
+    #define SOFT_I2C_TIMEOUT_US 5000
 #endif
 
 /* After a stuck bus is detected, stay off the bus for this many milliseconds
@@ -53,10 +57,10 @@
 #endif
 
 /* Max time (us) to wait for SCL to rise inside soft_i2c_recover()'s clock
-   toggles. Kept short: if the slave is genuinely wedged (not just
-   stretching) we give up quickly instead of blocking the main loop. */
+    toggles. Kept short: recover() now only runs from the wheel driver's lazy
+    path (after several failed reads, bus idle), so it must not block long. */
 #ifndef SOFT_I2C_RECOVER_TIMEOUT_US
-    #define SOFT_I2C_RECOVER_TIMEOUT_US 1000
+    #define SOFT_I2C_RECOVER_TIMEOUT_US 500
 #endif
 
 void     soft_i2c_init(void);

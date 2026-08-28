@@ -36,10 +36,14 @@ static bool scl_wait_high(void) {
     uint16_t timeout = SOFT_I2C_TIMEOUT_US;
     while (!scl_read()) {
         if (--timeout == 0) {
-            /* Bus is stuck: try to free it (called BEFORE arming the backoff
-               so this attempt actually runs), then back off so we stop
-               monopolizing the main loop. */
-            soft_i2c_recover();
+            /* Bus is stuck (clock stretch too long / wedged). Do NOT try to
+               recover here: recover() can itself busy-wait for many
+               milliseconds (it clocks SCL up to 9 times), which would stall
+               the main loop and freeze the pointer. Just arm the backoff so
+               the loop stays free for the PMW3360; the wheel driver performs a
+               lazy recover() after a few failed reads (when the bus is idle),
+               and a stretched slave releases SCL on its own once its
+               conversion completes. */
             soft_i2c_blocked_until = timer_read32() + SOFT_I2C_BACKOFF_MS;
             return false;
         }
