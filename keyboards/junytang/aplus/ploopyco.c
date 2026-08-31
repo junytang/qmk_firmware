@@ -38,13 +38,13 @@
 
 #ifndef PLOOPY_DPI_OPTIONS
 #    define PLOOPY_DPI_OPTIONS \
-        { 600, 1000, 1400, 1800, 2200 }
+        { 800, 1200, 1600, 2000, 2400 }
 #    ifndef PLOOPY_DPI_DEFAULT
-#        define PLOOPY_DPI_DEFAULT 2
+#        define PLOOPY_DPI_DEFAULT 1
 #    endif
 #endif
 #ifndef PLOOPY_DPI_DEFAULT
-#    define PLOOPY_DPI_DEFAULT 2
+#    define PLOOPY_DPI_DEFAULT 1
 #endif
 #ifndef PLOOPY_DRAGSCROLL_DIVISOR_H
 #    define PLOOPY_DRAGSCROLL_DIVISOR_H 8.0

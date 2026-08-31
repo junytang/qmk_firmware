@@ -6,7 +6,7 @@ SRC += gesture_mode.c
 # the polled, hang-free driver instead of the RP2040 hardware I2C (which can
 # freeze the main loop on a stuck bus). When enabled, the hardware I2C driver is
 # disabled (so it won't also drive GP6/GP7) and soft_i2c.c is compiled in.
-SOFT_I2C_DRIVER = yes
+SOFT_I2C_DRIVER = no
 ifeq ($(SOFT_I2C_DRIVER), yes)
     I2C_DRIVER_REQUIRED = no
     SRC += soft_i2c.c

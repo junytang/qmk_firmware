@@ -35,16 +35,7 @@ uint16_t rightwheel_deadzone_center = 0;
 
 uint16_t leftwheel_current_position = 0;
 uint16_t rightwheel_current_position = 0;
-
-static volatile bool g_wheel_data_fresh = false;
-
-/* Latest raw TMAG5273 angles, polled in housekeeping_task_user rather than in
-   pointing_device_task_user. The wheel reads use a slow, blocking (polled) soft
-   I2C transaction; doing them inline with the PMW3360 SPI read would delay the
-   pointer, and a glitchy bus could starve it. Polling here at a bounded rate and
-   publishing to these volatile buffers keeps the wheel reads off the SPI path. */
-static volatile uint16_t leftwheel_angle_stored  = 0;
-static volatile uint16_t rightwheel_angle_stored = 0;
+uint32_t last_scroll_time = 0;
 
 /* Layer lighting, used to blink when making gestures. */
 const rgblight_segment_t PROGMEM righty_nav_layer_colour[] =        RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_NAVBLUE} );
@@ -409,12 +400,6 @@ void keyboard_post_init_user(void) {
     rightwheel_current_position = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
     rightwheel_deadzone_center = rightwheel_current_position;
 
-    /* Seed the polled-angle buffers so the first wheel delta is zero until
-       housekeeping_task_user starts updating them. */
-    leftwheel_angle_stored  = leftwheel_current_position;
-    rightwheel_angle_stored = rightwheel_current_position;
-
-
     /* =================== Persistent Configuration Setup ================== */
 
     /* Load up configuration details from the EEPROM user-data block. */
@@ -422,7 +407,7 @@ void keyboard_post_init_user(void) {
     /* An erased/garbage block reads as 0xFFFFFFFF (or a corrupt led_brightness);
        reseed the board defaults and persist them so the gesture keycode and
        lighting stay sane. */
-    if (user_config.raw == 0xFFFFFFFF || user_config.led_brightness > 7) {
+    if (user_config.raw == 0xFFFFFFFF || user_config.led_brightness > 5) {
         user_config.raw = 0;
         user_config.left_handed = true;
         user_config.horizontal_scroll_arrows = false;
@@ -496,6 +481,9 @@ void keyboard_post_init_user(void) {
 
     /* Set an initial colour to establish a baseline brightness for the RGB layers. */
     rgblight_sethsv(0, 0, RGBLIGHT_VAL_STEP * user_config.led_brightness);
+    if (user_config.led_brightness <= 0) {
+        rgblight_disable_noeeprom();
+    }
 }
 
 bool process_record_user(uint16_t keycode, keyrecord_t* record) {
@@ -595,10 +583,13 @@ bool process_record_user(uint16_t keycode, keyrecord_t* record) {
                     rgblight_decrease_val_noeeprom();
                     rgblight_decrease_val_noeeprom();
                     rgblight_decrease_val_noeeprom();
-                    user_config.led_brightness = 1;
+                    rgblight_decrease_val_noeeprom();
+                    rgblight_disable_noeeprom();
+                    user_config.led_brightness = 0;
                     eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
                 }
                 else {
+                    rgblight_enable_noeeprom();
                     rgblight_increase_val_noeeprom();
                     user_config.led_brightness += 1;
                     eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
@@ -799,28 +790,11 @@ int16_t rightwheel_volume_scroll_tick = 0;
 uint32_t leftwheel_timeout = 0;
 uint32_t rightwheel_timeout = 0;
 
-/* Poll the TMAG5273 wheels here (not in pointing_device_task_user). The soft
-   I2C driver is blocking, so doing it inline with the PMW3360 SPI read would
-   delay the pointer and a glitchy/stuck bus could starve it. We poll at a
-   bounded rate and publish to the volatile buffers consumed by
-   pointing_device_task_user. */
-void housekeeping_task_user(void) {
-    static uint32_t last_wheel_i2c_time = 0;
-        if (timer_elapsed32(last_wheel_i2c_time) > 20) {
-        leftwheel_angle_stored  = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
-        rightwheel_angle_stored = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
-        last_wheel_i2c_time = timer_read32();
-        g_wheel_data_fresh = true;
-    }
-}
-
 report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
     // throttle reads
-    if (g_wheel_data_fresh) {
-        g_wheel_data_fresh = false; // 消费新数据
-
-        uint16_t leftwheel_rawangle = leftwheel_angle_stored;
-        uint16_t rightwheel_rawangle = rightwheel_angle_stored;
+    if (timer_elapsed32(last_scroll_time) > 20) {
+        uint16_t leftwheel_rawangle = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
+        uint16_t rightwheel_rawangle = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
 
         int16_t leftwheel_deadzone_distance = calculate_deadzone_distance( leftwheel_rawangle, &leftwheel_deadzone_center );
         int16_t rightwheel_deadzone_distance = calculate_deadzone_distance( rightwheel_rawangle, &rightwheel_deadzone_center );
@@ -839,7 +813,7 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         else {
             /* Don't increment forever, you'll get rollover. */
             if( leftwheel_timeout < TMAG5273_DEADZONE_PROTECTOR_TIMEOUT ) {
-                leftwheel_timeout += 8;
+                leftwheel_timeout += timer_elapsed32(last_scroll_time);
             }
         }
         if( abs(rightwheel_delta) > 2 ) {
@@ -848,9 +822,12 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         else {
             /* Don't increment forever, you'll get rollover. */
             if( rightwheel_timeout < TMAG5273_DEADZONE_PROTECTOR_TIMEOUT ) {
-                rightwheel_timeout += 8;
+                rightwheel_timeout += timer_elapsed32(last_scroll_time);
             }
         }
+
+        /* Reset the counter so we know when to next perform all this scroll processing. */
+        last_scroll_time = timer_read32();
 
         /* If either of the wheels times out, we move the deadzone window to
            where the position is. This prevents spurious scroll events. */

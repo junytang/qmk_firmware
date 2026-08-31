@@ -64,12 +64,10 @@ void tmag5273_init_device(uint8_t device_addr) {
 
     // Give found device a new device address
     uint8_t i2c_address = device_addr | 0x1;
-    tmag_i2c_write_reg(addr, REG_I2C_ADDRESS, &i2c_address, 1, 20);
+    tmag_i2c_write_reg(addr, REG_I2C_ADDRESS, &i2c_address, 1, 100);
 
-    // // 32x oversampling
-    // uint8_t device_config_1 = 0b101 << 2;
-    // 16x oversampling
-    uint8_t device_config_1 = 0b100 << 2;
+    // 32x oversampling
+    uint8_t device_config_1 = 0b101 << 2;
 
     // Low noise mode
     // Operating Mode: Continuous Measure Mode
@@ -84,10 +82,10 @@ void tmag5273_init_device(uint8_t device_addr) {
 
     uint8_t int_config = 0x1;
 
-    tmag_i2c_write_reg(device_addr, REG_DEVICE_CONFIG_1, &device_config_1, 1, 20);
-    tmag_i2c_write_reg(device_addr, REG_DEVICE_CONFIG_2, &device_config_2, 1, 20);
-    tmag_i2c_write_reg(device_addr, REG_SENSOR_CONFIG_1, &sensor_config_1, 1, 20);
-    tmag_i2c_write_reg(device_addr, REG_SENSOR_CONFIG_2, &sensor_config_2, 1, 20);
+    tmag_i2c_write_reg(device_addr, REG_DEVICE_CONFIG_1, &device_config_1, 1, 100);
+    tmag_i2c_write_reg(device_addr, REG_DEVICE_CONFIG_2, &device_config_2, 1, 100);
+    tmag_i2c_write_reg(device_addr, REG_SENSOR_CONFIG_1, &sensor_config_1, 1, 100);
+    tmag_i2c_write_reg(device_addr, REG_SENSOR_CONFIG_2, &sensor_config_2, 1, 100);
     tmag_i2c_write_reg(device_addr, REG_INT_CONFIG_1, &int_config, 1, 100);
 }
 
