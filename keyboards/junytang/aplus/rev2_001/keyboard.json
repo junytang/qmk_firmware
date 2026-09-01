@@ -5,11 +5,11 @@
     "diode_direction": "COL2ROW",
     "matrix_pins": {
         "direct": [
-            ["GP27", "GP28", "GP29", "GP1", "GP0",  "GP2", "GP13", "GP3"]
+            ["GP7", "GP29", "GP27", "GP23", "GP21", "GP15", "GP8", "GP11"]
         ]
     },
     "ws2812": {
         "driver": "vendor",
-        "pin": "GP8"
+        "pin": "GP17"
     }
 }
