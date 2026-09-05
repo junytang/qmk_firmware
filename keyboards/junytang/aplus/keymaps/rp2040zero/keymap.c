@@ -87,9 +87,9 @@ typedef struct {
 
 scroll_accel_config_t g_scroll_accel_config = {
     .enabled = 1,
-    .offset = 160.0f,
+    .offset = 220.0f,
     .takeoff = 0.03f,
-    .growth_rate = 0.03f,
+    .growth_rate = 0.012f,
     .limit = 1.0f,
     .limit_upper = 4.0f,
 };
@@ -123,7 +123,7 @@ _Static_assert(DPI_EEPROM_OFFSET + sizeof(dpi_config_t) <= EECONFIG_USER_DATA_SI
 #define SCROLL_ACCEL_R_MIN_GROWTH_RATE 0.001f
 #define SCROLL_ACCEL_R_MAX_GROWTH_RATE 0.1f
 #define SCROLL_ACCEL_R_MIN_LIMIT 0.5f
-#define SCROLL_ACCEL_R_MAX_LIMIT 1.0f
+#define SCROLL_ACCEL_R_MAX_LIMIT 2.0f   /* >1.0 = 低速比 1:1 更快（慢速滚动提速） */
 #define SCROLL_ACCEL_R_MIN_LIMIT_UPPER 1.0f
 #define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
 
@@ -342,9 +342,9 @@ void eeconfig_init_user(void) {
        factory-init / wipe can never leave k or max_boost as 0. */
     g_scroll_accel_config = (scroll_accel_config_t){
         .enabled = 1,
-        .offset = 160.0f,
+        .offset = 220.0f,
         .takeoff = 0.03f,
-        .growth_rate = 0.03f,
+        .growth_rate = 0.012f,
         .limit = 1.0f,
         .limit_upper = 4.0f,
     };
@@ -439,9 +439,9 @@ void keyboard_post_init_user(void) {
           g_scroll_accel_config.limit_upper == 0.0f && g_scroll_accel_config.enabled == 0)) {
         g_scroll_accel_config = (scroll_accel_config_t){
             .enabled = 1,
-            .offset = 160.0f,
+            .offset = 220.0f,
             .takeoff = 0.03f,
-            .growth_rate = 0.03f,
+            .growth_rate = 0.012f,
             .limit = 1.0f,
             .limit_upper = 4.0f,
         };
@@ -627,7 +627,8 @@ int32_t rightwheel_scroll_acc = 0;
 int16_t leftwheel_arrow_scroll_tick = 0;
 int16_t rightwheel_arrow_scroll_tick = 0;
 
-#define ACCEL_LUT_SIZE 128 // 覆盖 speed 从 0 到 127 (足以应对任何极速甩动)
+#define ACCEL_LUT_SIZE 512 // 覆盖 speed 从 0 到 511：让 Sigmoid 平滑爬升到 limit_upper，
+                           // 避免在 speed>=128 处直接悬崖式钳到上限（那样中速就被当成高速）
 
 static int32_t s_accel_lut[ACCEL_LUT_SIZE];
 static int32_t s_accel_maxf = 256;
@@ -787,6 +788,22 @@ static int16_t scroll_accel_apply(int32_t *acc, int16_t delta, int16_t base_div)
 int16_t leftwheel_volume_scroll_tick = 0;
 int16_t rightwheel_volume_scroll_tick = 0;
 
+/* Low-pass filter state for wheel deltas (smooths quantisation noise at slow
+   scroll speeds). α = 0.3 → time-constant ≈ 2 polls ≈ 30 ms at 15 ms rate. */
+static int16_t leftwheel_filtered_delta  = 0;
+static int16_t rightwheel_filtered_delta = 0;
+#define WHEEL_DELTA_FILTER_ALPHA_NUM 3
+#define WHEEL_DELTA_FILTER_ALPHA_DEN 10
+/* The delta low-pass filter keeps its state scaled up by this much, so the
+   integer division cannot swallow small deltas. With the plain integer EMA a
+   steady low-speed delta of 1-3 units collapsed to 0 (ALL motion lost) and
+   4-10 units lost 30-75%, while high speed only lost ~6-10% -- which is why
+   slow scrolling stuttered or did not move at all. Scaling first keeps the
+   loss under ~1% at every speed. */
+#define WHEEL_DELTA_FILTER_SCALE 256
+static int32_t leftwheel_filtered_delta_state  = 0;
+static int32_t rightwheel_filtered_delta_state = 0;
+
 uint32_t leftwheel_timeout = 0;
 uint32_t rightwheel_timeout = 0;
 
@@ -804,6 +821,15 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
 
         int16_t rightwheel_delta = calculate_wheel_delta( rightwheel_rawangle, rightwheel_current_position );
         rightwheel_current_position = rightwheel_rawangle;
+
+        /* Low-pass filter the deltas to smooth quantisation noise at slow
+           scroll speeds. Raw deltas are still used for the idle-timeout check. */
+        leftwheel_filtered_delta_state  = (WHEEL_DELTA_FILTER_ALPHA_NUM * (int32_t)leftwheel_delta  * WHEEL_DELTA_FILTER_SCALE +
+                                          (WHEEL_DELTA_FILTER_ALPHA_DEN - WHEEL_DELTA_FILTER_ALPHA_NUM) * leftwheel_filtered_delta_state)  / WHEEL_DELTA_FILTER_ALPHA_DEN;
+        rightwheel_filtered_delta_state = (WHEEL_DELTA_FILTER_ALPHA_NUM * (int32_t)rightwheel_delta * WHEEL_DELTA_FILTER_SCALE +
+                                          (WHEEL_DELTA_FILTER_ALPHA_DEN - WHEEL_DELTA_FILTER_ALPHA_NUM) * rightwheel_filtered_delta_state) / WHEEL_DELTA_FILTER_ALPHA_DEN;
+        leftwheel_filtered_delta  = (int16_t)(leftwheel_filtered_delta_state  / WHEEL_DELTA_FILTER_SCALE);
+        rightwheel_filtered_delta = (int16_t)(rightwheel_filtered_delta_state / WHEEL_DELTA_FILTER_SCALE);
 
         /* If either wheel moved, we reset the timeout counter. Else, we start
            counting inactivity. */
@@ -853,8 +879,8 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         /* If we're on the control layers, both wheels adjust the volume. */
         if( layer_state_is(LAYER_CONTROL) ) {
 
-            leftwheel_volume_scroll_tick += leftwheel_delta;
-            rightwheel_volume_scroll_tick += rightwheel_delta;
+            leftwheel_volume_scroll_tick += leftwheel_filtered_delta;
+            rightwheel_volume_scroll_tick += rightwheel_filtered_delta;
 
             if( leftwheel_volume_scroll_tick > TMAG5273_VOLUME_SCROLL_TICK_SIZE ) {
                 tap_code(KC_VOLU);
@@ -882,8 +908,8 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
            This behaviour is the same across OSes. */
         if( user_config.horizontal_scroll_arrows ) {
 
-            leftwheel_arrow_scroll_tick += leftwheel_delta;
-            rightwheel_arrow_scroll_tick += rightwheel_delta;
+            leftwheel_arrow_scroll_tick += leftwheel_filtered_delta;
+            rightwheel_arrow_scroll_tick += rightwheel_filtered_delta;
 
             if( user_config.left_handed ) {
                 if( leftwheel_arrow_scroll_tick > TMAG5273_HORIZ_SCROLL_TICK_SIZE ) {
@@ -916,8 +942,8 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
            This behaviour is the same across OSes. */
         if( user_config.vertical_scroll_arrows ) {
 
-            leftwheel_arrow_scroll_tick += leftwheel_delta;
-            rightwheel_arrow_scroll_tick += rightwheel_delta;
+            leftwheel_arrow_scroll_tick += leftwheel_filtered_delta;
+            rightwheel_arrow_scroll_tick += rightwheel_filtered_delta;
 
             if( user_config.left_handed ) {
                 if( rightwheel_arrow_scroll_tick > TMAG5273_VERT_SCROLL_TICK_SIZE ) {
@@ -946,12 +972,12 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         }
 
         /* Accumulate (and emit) only once the wheel is OUTSIDE the deadzone.
-           While inside the deadzone the residual is reset to zero, so the motion
-           made before crossing is intentionally discarded (anti-jitter: no scroll
-           near rest) and the scroll count starts fresh from zero at the crossing
-           point -- never a burst of accumulated startup motion. The wheel->axis
-           mapping is identical for hi-res and low-res OSes; only the divisor
-           differs, so the deadzone gate applies uniformly (incl. macOS). */
+           Inside the deadzone scroll_accel_apply() is simply not called, so the
+           Bresenham residual is left untouched (it is NOT cleared) and slow
+           motion keeps accumulating towards the next emitted tick. The
+           wheel->axis mapping is identical for hi-res and low-res OSes; only
+           the divisor differs, so the deadzone gate applies uniformly
+           (incl. macOS). */
         bool hi_res = (detected_host_os() == OS_WINDOWS || detected_host_os() == OS_LINUX);
 
         bool left_is_h  = user_config.left_handed;
@@ -970,20 +996,20 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         if ( left_outside ) {
             if ( left_is_h ) {
                 if ( !user_config.horizontal_scroll_arrows ) {
-                    mouse_report.h = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, left_div);
+                    mouse_report.h = scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_filtered_delta, left_div);
                 }
             } else {
-                mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_delta, left_div);
+                mouse_report.v = -scroll_accel_apply(&leftwheel_scroll_acc, leftwheel_filtered_delta, left_div);
             }
         }
 
         if ( right_outside ) {
             if ( right_is_h ) {
                 if ( !user_config.horizontal_scroll_arrows ) {
-                    mouse_report.h = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, right_div);
+                    mouse_report.h = scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_filtered_delta, right_div);
                 }
             } else {
-                mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_delta, right_div);
+                mouse_report.v = -scroll_accel_apply(&rightwheel_scroll_acc, rightwheel_filtered_delta, right_div);
             }
         }
 

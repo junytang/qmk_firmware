@@ -100,7 +100,7 @@
             {
               "content": ["id_scroll_accel_limit", 25, 3],
               "label": "Limit (low-speed floor, x0.001)",
-              "options": [500, 1000],
+              "options": [500, 2000],
               "type": "range"
             },
             {
