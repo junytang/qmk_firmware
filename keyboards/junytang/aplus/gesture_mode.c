@@ -58,14 +58,14 @@ void cg_fin(tap_dance_state_t *state, void *user_data) {
             tap_code16(tap_kc);
             break;
         case SINGLE_HOLD:
-            layer_on(LAYER_CONTROL);
-            cg_layer_active = true;
+            pointing_device_gestures_start();
+            cg_gesture_active = true;
             break;
         case DOUBLE_HOLD:
             /* tap then hold: run the pointing-device gesture until the key is
              * released (cleaned up in cg_rst via cg_gesture_active). */
-            pointing_device_gestures_start();
-            cg_gesture_active = true;
+            layer_on(LAYER_CONTROL);
+            cg_layer_active = true;
             break;
         default:
             break;

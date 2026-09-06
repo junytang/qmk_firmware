@@ -20,6 +20,8 @@
 #include "../../ploopyco.h"
 #include "../../gesture_mode.h"
 
+#include "drivers/sensors/pmw33xx_common.h"
+
 #include "rgblight.h"
 #include "printf.h"
 
@@ -368,6 +370,82 @@ void keyboard_pre_init_user(void) {
 
 }
 
+static bool     s_trackball_asleep        = false;
+static uint32_t s_trackball_last_activity = 0;
+static bool     s_sleep_rgb_was_enabled   = false;
+
+/* True once the PMW3360 has been truly shut down via REG_Shutdown. While off
+   the sensor cannot report motion, so only a key press (or the existing wake
+   paths) can power it back on. */
+static bool     s_pmw_off                 = false;
+
+/* Set on wake. The stored wheel positions are stale because the wheels were
+   not polled while asleep, so the next delta would be measured against where
+   they were minutes ago and become one huge burst of scroll. */
+static bool s_wheel_resync_pending = false;
+
+/* Note input activity and wake the trackball if it was asleep. */
+static void trackball_wake(void) {
+    bool was_asleep = s_trackball_asleep;
+    s_trackball_asleep       = false;
+    s_trackball_last_activity = timer_read32();
+    if (was_asleep) {
+        s_wheel_resync_pending = true;
+        if (s_sleep_rgb_was_enabled && !rgblight_is_enabled()) {
+            rgblight_enable_noeeprom();
+        }
+
+        /* Power the PMW3360 back on. REG_Shutdown (0xb6) clears the SROM, so
+           we must run the full power-up reset + re-init sequence. The reset
+           write alone is not enough; pmw33xx_init() re-uploads the firmware,
+           restores CPI from the build default, then dpi_apply() re-applies the
+           user's saved DPI preset. */
+        if (s_pmw_off) {
+            pmw33xx_write(0, REG_Power_Up_Reset, 0x5a);
+            wait_ms(50);
+            pmw33xx_init(0);
+            dpi_apply();
+            s_pmw_off = false;
+        }
+
+        /* Re-apply power to the two TMAG5273 wheels and re-init them (their
+           power was cut on sleep). The wheel position resync below then
+           re-baselines current_position / deadzone_center against the new
+           absolute angle on the first poll, so no scroll burst occurs. */
+        gpio_write_pin_high(TMAG5273_D0_PWR_PIN);
+        wait_us(370);  // TMAG tstart_power_up, plus 100us margin
+        tmag5273_init_device(TMAG5273_D0_I2C_ADDRESS);
+        wait_ms(20);
+        gpio_write_pin_high(TMAG5273_D1_PWR_PIN);
+        wait_us(370);  // TMAG tstart_power_up, plus 100us margin
+        tmag5273_init_device(TMAG5273_D1_I2C_ADDRESS);
+        wait_ms(20);
+    }
+}
+
+void housekeeping_task_user(void) {
+    if (!s_trackball_asleep && timer_elapsed32(s_trackball_last_activity) > TRACKBALL_SLEEP_TIMEOUT_MS) {
+        s_trackball_asleep = true;
+        s_sleep_rgb_was_enabled = rgblight_is_enabled();
+        rgblight_disable_noeeprom();
+
+        /* Truly power down the PMW3360. Writing 0xb6 to REG_Shutdown puts the
+           sensor into its lowest-power state (the SPI interface still responds,
+           but the optical array / DSP are off). This is the real power saving;
+           gating the report alone would leave the sensor fully powered. */
+        if (!s_pmw_off) {
+            pmw33xx_write(0, REG_Shutdown, 0xb6);
+            s_pmw_off = true;
+        }
+
+        /* Cut power to the two TMAG5273 wheels entirely via their power pins.
+           While asleep, pointing_device_task_user returns before the wheel
+           block, so no I2C traffic touches the unpowered devices. */
+        gpio_write_pin_low(TMAG5273_D0_PWR_PIN);
+        gpio_write_pin_low(TMAG5273_D1_PWR_PIN);
+    }
+}
+
 void keyboard_post_init_user(void) {
     /* ============================ Debug Setup ============================ */
 
@@ -484,9 +562,16 @@ void keyboard_post_init_user(void) {
     if (user_config.led_brightness <= 0) {
         rgblight_disable_noeeprom();
     }
+
+    /* Start the auto-sleep idle timer from now, so the board never boots
+       already asleep. */
+    s_trackball_last_activity = timer_read32();
 }
 
 bool process_record_user(uint16_t keycode, keyrecord_t* record) {
+    /* Any key event (press or release) wakes the trackball from auto-sleep. */
+    trackball_wake();
+
     switch (keycode) {
         case PKC_TGL_MIRROR:
             if (record->event.pressed) {
@@ -808,10 +893,51 @@ uint32_t leftwheel_timeout = 0;
 uint32_t rightwheel_timeout = 0;
 
 report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
+
+    /* While awake, any ball or button motion holds off auto-sleep by pushing
+       the idle timer forward. This only refreshes the timer; it cannot wake
+       from sleep because the hardware is truly off then -- only a key press can
+       do that. */
+    if (mouse_report.x != 0 || mouse_report.y != 0 || mouse_report.buttons != 0) {
+        s_trackball_last_activity = timer_read32();
+    }
+
+    /* While asleep, suppress all pointing output and return before the 20 ms
+       block below, so the two wheels are not polled at all. v/h must be zeroed
+       as well: the scroll code only ever writes them, so a stale value would
+       otherwise leak through. */
+    if (s_trackball_asleep) {
+        mouse_report.x = 0;
+        mouse_report.y = 0;
+        mouse_report.v = 0;
+        mouse_report.h = 0;
+        return mouse_report;
+    }
+
     // throttle reads
     if (timer_elapsed32(last_scroll_time) > 20) {
         uint16_t leftwheel_rawangle = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
         uint16_t rightwheel_rawangle = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
+
+        /* First poll after waking: the stored wheel positions are stale because
+           we were not polling, so re-baseline them against where the wheels are
+           now (discarding anything that moved while asleep) and drop this
+           tick's wheel input rather than emitting one huge burst of scroll. */
+        if (s_wheel_resync_pending) {
+            s_wheel_resync_pending        = false;
+            leftwheel_current_position    = leftwheel_rawangle;
+            leftwheel_deadzone_center     = leftwheel_rawangle;
+            rightwheel_current_position   = rightwheel_rawangle;
+            rightwheel_deadzone_center    = rightwheel_rawangle;
+            leftwheel_filtered_delta_state  = 0;
+            rightwheel_filtered_delta_state = 0;
+            leftwheel_filtered_delta        = 0;
+            rightwheel_filtered_delta       = 0;
+            leftwheel_scroll_acc            = 0;
+            rightwheel_scroll_acc           = 0;
+            last_scroll_time = timer_read32();
+            return mouse_report;
+        }
 
         int16_t leftwheel_deadzone_distance = calculate_deadzone_distance( leftwheel_rawangle, &leftwheel_deadzone_center );
         int16_t rightwheel_deadzone_distance = calculate_deadzone_distance( rightwheel_rawangle, &rightwheel_deadzone_center );
@@ -830,6 +956,11 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
                                           (WHEEL_DELTA_FILTER_ALPHA_DEN - WHEEL_DELTA_FILTER_ALPHA_NUM) * rightwheel_filtered_delta_state) / WHEEL_DELTA_FILTER_ALPHA_DEN;
         leftwheel_filtered_delta  = (int16_t)(leftwheel_filtered_delta_state  / WHEEL_DELTA_FILTER_SCALE);
         rightwheel_filtered_delta = (int16_t)(rightwheel_filtered_delta_state / WHEEL_DELTA_FILTER_SCALE);
+
+        /* Wheel/scroll motion also holds off auto-sleep while awake. */
+        if (abs(leftwheel_delta) > 2 || abs(rightwheel_delta) > 2) {
+            s_trackball_last_activity = timer_read32();
+        }
 
         /* If either wheel moved, we reset the timeout counter. Else, we start
            counting inactivity. */
