@@ -384,8 +384,36 @@ static bool     s_pmw_off                 = false;
    they were minutes ago and become one huge burst of scroll. */
 static bool s_wheel_resync_pending = false;
 
-/* Note input activity and wake the trackball if it was asleep. */
-static void trackball_wake(void) {
+/* Put the trackball to sleep: freeze the cursor, blank the underglow, truly
+   power down the PMW3360 (REG_Shutdown) and cut the two TMAG5273 wheels from
+   their power pins. Idempotent -- safe to call when already asleep. */
+static void trackball_sleep_now(void) {
+    if (s_trackball_asleep) return;
+    s_trackball_asleep = true;
+    s_sleep_rgb_was_enabled = rgblight_is_enabled();
+    rgblight_disable_noeeprom();
+
+    /* Truly power down the PMW3360. Writing 0xb6 to REG_Shutdown puts the
+       sensor into its lowest-power state (the SPI interface still responds,
+       but the optical array / DSP are off). This is the real power saving;
+       gating the report alone would leave the sensor fully powered. */
+    if (!s_pmw_off) {
+        pmw33xx_write(0, REG_Shutdown, 0xb6);
+        s_pmw_off = true;
+    }
+
+    /* Cut power to the two TMAG5273 wheels entirely via their power pins.
+       While asleep, pointing_device_task_user returns before the wheel
+       block, so no I2C traffic touches the unpowered devices. */
+    gpio_write_pin_low(TMAG5273_D0_PWR_PIN);
+    gpio_write_pin_low(TMAG5273_D1_PWR_PIN);
+}
+
+/* Wake the trackball from sleep: re-power and re-init the PMW3360 and both
+   TMAG5273 wheels, and flag a wheel-position resync. The first poll after
+   waking re-baselines current_position / deadzone_center against the new
+   absolute angles, so no scroll burst occurs. */
+static void trackball_wake_now(void) {
     bool was_asleep = s_trackball_asleep;
     s_trackball_asleep       = false;
     s_trackball_last_activity = timer_read32();
@@ -423,27 +451,26 @@ static void trackball_wake(void) {
     }
 }
 
+/* Called by process_record_user on any key event. */
+static void trackball_wake(void) {
+    trackball_wake_now();
+}
+
 void housekeeping_task_user(void) {
     if (!s_trackball_asleep && timer_elapsed32(s_trackball_last_activity) > TRACKBALL_SLEEP_TIMEOUT_MS) {
-        s_trackball_asleep = true;
-        s_sleep_rgb_was_enabled = rgblight_is_enabled();
-        rgblight_disable_noeeprom();
-
-        /* Truly power down the PMW3360. Writing 0xb6 to REG_Shutdown puts the
-           sensor into its lowest-power state (the SPI interface still responds,
-           but the optical array / DSP are off). This is the real power saving;
-           gating the report alone would leave the sensor fully powered. */
-        if (!s_pmw_off) {
-            pmw33xx_write(0, REG_Shutdown, 0xb6);
-            s_pmw_off = true;
-        }
-
-        /* Cut power to the two TMAG5273 wheels entirely via their power pins.
-           While asleep, pointing_device_task_user returns before the wheel
-           block, so no I2C traffic touches the unpowered devices. */
-        gpio_write_pin_low(TMAG5273_D0_PWR_PIN);
-        gpio_write_pin_low(TMAG5273_D1_PWR_PIN);
+        trackball_sleep_now();
     }
+}
+
+/* Host (e.g. Mac) sleep: USB suspend. Power the trackball down too, so it is
+   not left running while the computer is off. */
+void suspend_power_down_user(void) {
+    trackball_sleep_now();
+}
+
+/* Host resume: power the trackball back on, ready to use immediately. */
+void suspend_wakeup_init_user(void) {
+    trackball_wake_now();
 }
 
 void keyboard_post_init_user(void) {
@@ -957,8 +984,13 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         leftwheel_filtered_delta  = (int16_t)(leftwheel_filtered_delta_state  / WHEEL_DELTA_FILTER_SCALE);
         rightwheel_filtered_delta = (int16_t)(rightwheel_filtered_delta_state / WHEEL_DELTA_FILTER_SCALE);
 
-        /* Wheel/scroll motion also holds off auto-sleep while awake. */
-        if (abs(leftwheel_delta) > 2 || abs(rightwheel_delta) > 2) {
+        /* Wheel/scroll motion holds off auto-sleep, but ONLY on deliberate
+           scrolling -- i.e. movement past the deadzone -- NOT on the few-LSB
+           angle jitter the TMAG reports while at rest. Gating on the raw delta
+           (> 2) would trip on that jitter every poll and perpetually reset the
+           idle timer, so the board would never reach the sleep timeout. */
+        if (abs(leftwheel_deadzone_distance) > TMAG5273_WHEEL_DEADZONE ||
+            abs(rightwheel_deadzone_distance) > TMAG5273_WHEEL_DEADZONE) {
             s_trackball_last_activity = timer_read32();
         }
 

@@ -24,4 +24,4 @@
    ball/button motion or wheel movement, the trackball stops tracking: the
    cursor is frozen and the TMAG5273 wheel I2C polls are skipped entirely.
    Any key press wakes it. */
-#define TRACKBALL_SLEEP_TIMEOUT_MS 60 * 60 * 1000 // 60 minutes of idle before sleeping
+#define TRACKBALL_SLEEP_TIMEOUT_MS 120 * 60 * 1000 // 120 minutes of idle before sleeping
