@@ -279,14 +279,25 @@ const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
 
 /* 3-in-1 control/gesture key (TD_CONTROL_GESTURE), defined in gesture_mode.c:
  *   single tap    -> user_config.gesture_tap_keycode (MS_BTN7 default, VIA-settable)
- *   single hold   -> MO(LAYER_CONTROL) for the duration of the hold
- *   tap then hold -> pointing-device gesture mode */
+ *   single hold   -> pointing-device gesture mode
+ *   tap then hold -> MO(LAYER_CONTROL) for the duration of the hold */
 tap_dance_action_t tap_dance_actions[] = {
     [TD_CONTROL_GESTURE] = { .fn = { .on_each_tap       = cg_press,
                                      .on_dance_finished = cg_fin,
                                      .on_reset          = cg_rst },
                               .user_data = (void *)&user_config.gesture_tap_keycode },
 };
+
+/* Per-key tapping term: only the 3-in-1 key needs a longer window, everything
+ * else keeps the default so the rest of the keymap is unaffected. */
+uint16_t get_tapping_term(uint16_t keycode, keyrecord_t *record) {
+    switch (keycode) {
+        case TD(TD_CONTROL_GESTURE):
+            return TD_CONTROL_GESTURE_TERM;
+        default:
+            return TAPPING_TERM;
+    }
+}
 
 /* Called whenever layers are modified. */
 layer_state_t layer_state_set_user(layer_state_t state) {
@@ -334,7 +345,7 @@ void eeconfig_init_user(void) {
     user_config.horizontal_scroll_arrows = false;   // False = Scroll events, True = left/right arrows.
     user_config.vertical_scroll_arrows = false;     // False = Scroll events, True = up/down arrows.
     user_config.drag_scroll_mode = false;           // Hold to activate.
-    user_config.led_brightness = 4;                 // Brightest mode by default.
+    user_config.led_brightness = 1;                 // Dimmest visible level by default (0 = off).
     user_config.gesture_tap_keycode = MS_BTN7;    // Tap of the gesture key.
 
     eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
@@ -518,7 +529,7 @@ void keyboard_post_init_user(void) {
         user_config.horizontal_scroll_arrows = false;
         user_config.vertical_scroll_arrows = false;
         user_config.drag_scroll_mode = false;
-        user_config.led_brightness = 4;
+        user_config.led_brightness = 1;             // Dimmest visible level (0 = off).
         user_config.gesture_tap_keycode = MS_BTN7;
         eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
     }

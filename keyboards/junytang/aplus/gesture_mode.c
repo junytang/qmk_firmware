@@ -45,8 +45,9 @@ static int cg_cur_dance(tap_dance_state_t *state) {
     else return 8; //magic number. At some point this method will expand to work for more presses
 }
 
-/* The gesture is started in cg_fin once a DOUBLE_HOLD is resolved, so the
- * different press methods stay clearly separated (see cg_cur_dance). */
+/* The action is chosen in cg_fin from the resolved dance state (see
+ * cg_cur_dance): SINGLE_HOLD starts the gesture, DOUBLE_HOLD ("tap then
+ * hold") turns on LAYER_CONTROL. Both are cleaned up in cg_rst on release. */
 void cg_press(tap_dance_state_t *state, void *user_data) {
 }
 
@@ -62,7 +63,7 @@ void cg_fin(tap_dance_state_t *state, void *user_data) {
             cg_gesture_active = true;
             break;
         case DOUBLE_HOLD:
-            /* tap then hold: run the pointing-device gesture until the key is
+            /* tap then hold: run the layer_on until the key is
              * released (cleaned up in cg_rst via cg_gesture_active). */
             layer_on(LAYER_CONTROL);
             cg_layer_active = true;
