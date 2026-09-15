@@ -68,4 +68,9 @@
    This must be >= 39; grow it if any struct grows. After flashing a build that
    changes this, do a one-time EEPROM reset so eeconfig_init_user repopulates
    everything with defaults. */
-#define EECONFIG_USER_DATA_SIZE 40
+/* Reserved space for the persistent user blocks in keymap.c:
+ *   user_config_t (8, grown to hold both configurable tap keycodes)
+ * + scroll_accel_config_t (24) + dpi_config_t (12) = 44.
+ * Bumped 40 -> 48 when user_config_t grew; the static asserts in keymap.c
+ * will fail loudly if this ever needs raising again. */
+#define EECONFIG_USER_DATA_SIZE 48

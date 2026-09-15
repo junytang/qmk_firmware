@@ -1,4 +1,4 @@
-SRC += gesture_mode.c
+SRC += tap_dance.c
 SOFT_I2C_DRIVER = no
 ifeq ($(SOFT_I2C_DRIVER), yes)
     I2C_DRIVER_REQUIRED = no

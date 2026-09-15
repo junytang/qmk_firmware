@@ -120,6 +120,11 @@
                "content": ["id_gesture_tap_keycode", 25, 5],
                "label": "Gesture tap keycode",
                "type": "keycode"
+             },
+             {
+               "content": ["id_drag_scroll_tap_keycode", 25, 8],
+               "label": "Drag-scroll tap keycode",
+               "type": "keycode"
              }
           ]
         },

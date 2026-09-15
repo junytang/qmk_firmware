@@ -14,10 +14,15 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "gesture_mode.h"
+#include "tap_dance.h"
+#include "ploopyco.h"   /* is_drag_scroll / toggle_drag_scroll() */
 
 static bool cg_layer_active = false;
 static bool cg_gesture_active = false;
+
+/* True while a TD_DRAG_SCROLL hold is keeping drag-scroll on in "press and
+ * hold" mode, so ds_rst can release it without touching the toggle mode. */
+static bool ds_hold_active = false;
 
 static int cg_cur_dance(tap_dance_state_t *state) {
     if (state->count == 1) {
@@ -81,5 +86,43 @@ void cg_rst(tap_dance_state_t *state, void *user_data) {
     if (cg_gesture_active) {
         pointing_device_gestures_end();
         cg_gesture_active = false;
+    }
+}
+
+/* TD_DRAG_SCROLL -- the old PKC_DRAG_SCROLL key turned into a tap dance:
+ *   tap  -> the configurable drag_scroll_tap_keycode (MS_BTN8 default,
+ *           VIA-settable). The old "tap toggles drag scroll" behaviour is gone.
+ *   hold -> drag scroll, honouring user_config.drag_scroll_mode the same way
+ *           PKC_DRAG_SCROLL did (toggle vs press-and-hold). */
+void ds_press(tap_dance_state_t *state, void *user_data) {
+}
+
+void ds_fin(tap_dance_state_t *state, void *user_data) {
+    uint16_t tap_kc = *(const uint16_t *)user_data;
+    switch (cg_cur_dance(state)) {
+        case SINGLE_TAP:
+            tap_code16(tap_kc);
+            break;
+        case SINGLE_HOLD:
+            if (user_config.drag_scroll_mode) {
+                /* Toggle mode: flip it and leave it; ds_rst must not undo it. */
+                toggle_drag_scroll();
+            } else {
+                /* Press-and-hold mode: active for as long as the key is down. */
+                is_drag_scroll = true;
+                ds_hold_active  = true;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void ds_rst(tap_dance_state_t *state, void *user_data) {
+    /* Only press-and-hold mode is released here; toggle mode stays as the user
+     * left it. */
+    if (ds_hold_active) {
+        is_drag_scroll = false;
+        ds_hold_active  = false;
     }
 }

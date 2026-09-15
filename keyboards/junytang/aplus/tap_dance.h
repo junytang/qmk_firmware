@@ -19,10 +19,15 @@
 #include QMK_KEYBOARD_H
 #include "pointing_device_gestures.h"
 
-/* EEPROM-backed board settings. The gesture tap keycode lives here so it can
- * be changed (default KC_MS_BTN2) without rewriting the keycode tables. */
+/* EEPROM-backed board settings. Both configurable tap keycodes live here so
+ * they can be changed (gesture = MS_BTN7, drag-scroll = MS_BTN8) without
+ * rewriting the keycode tables.
+ *
+ * NOTE: this union is 8 bytes -- the two 16-bit keycodes do not fit in 32 bits
+ * alongside the other fields. Growing it shifts the scroll-accel / DPI blocks,
+ * so EECONFIG_USER_DATA_SIZE had to be bumped to match. */
 typedef union {
-    uint32_t raw;
+    uint64_t raw;
     struct {
         bool    left_handed :1;
         bool    horizontal_scroll_arrows :1;
@@ -30,23 +35,27 @@ typedef union {
         bool    drag_scroll_mode :1;
         uint8_t led_brightness: 8;
         uint16_t gesture_tap_keycode;
+        uint16_t drag_scroll_tap_keycode;
     };
 } user_config_t;
 
 extern user_config_t user_config;
 
-/* Layer indices, shared so gesture_mode.c can reference LAYER_CONTROL. */
+/* Layer indices, shared so tap_dance.c can reference LAYER_CONTROL. */
 enum {
     LAYER_NAV_RIGHT_HANDED = 0,
     LAYER_NAV_LEFT_HANDED,
     LAYER_CONTROL
 };
 
-/* 3-in-1 control/gesture key (TD_CONTROL_GESTURE): tap = the configurable
- * gesture_tap_keycode (MS_BTN7 default, VIA-settable), hold = MO(LAYER_CONTROL),
- * tap+hold (double-tap) = pointing-device gesture mode. */
+/* Tap dances. TD_CONTROL_GESTURE: tap = the configurable gesture_tap_keycode
+ * (MS_BTN7 default, VIA-settable), hold = pointing-device gesture mode,
+ * tap+hold = MO(LAYER_CONTROL).
+ * TD_DRAG_SCROLL: tap = the configurable drag_scroll_tap_keycode (MS_BTN8
+ * default, VIA-settable), hold = drag scroll. */
 enum {
     TD_CONTROL_GESTURE = 0,
+    TD_DRAG_SCROLL,
 };
 
 enum {
@@ -62,3 +71,7 @@ enum {
 void cg_press(tap_dance_state_t *state, void *user_data);
 void cg_fin(tap_dance_state_t *state, void *user_data);
 void cg_rst(tap_dance_state_t *state, void *user_data);
+
+void ds_press(tap_dance_state_t *state, void *user_data);
+void ds_fin(tap_dance_state_t *state, void *user_data);
+void ds_rst(tap_dance_state_t *state, void *user_data);

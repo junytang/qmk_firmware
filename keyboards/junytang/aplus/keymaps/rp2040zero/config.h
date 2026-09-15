@@ -40,3 +40,4 @@
  * "tap then hold" is still hard to hit. */
 #define TAPPING_TERM_PER_KEY
 #define TD_CONTROL_GESTURE_TERM 350
+#define TD_DRAG_SCROLL_TERM 200

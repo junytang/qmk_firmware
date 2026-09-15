@@ -18,7 +18,7 @@
 #include QMK_KEYBOARD_H
 
 #include "../../ploopyco.h"
-#include "../../gesture_mode.h"
+#include "../../tap_dance.h"
 
 #include "drivers/sensors/pmw33xx_common.h"
 
@@ -257,15 +257,17 @@ const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
     /* Keymap. */
     const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
         // Base layer with all of the mouse-related stuff for everyday use.
-        [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN6, MS_BTN5, PKC_DRAG_SCROLL, MS_BTN4,
+        [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN6, MS_BTN5, TD(TD_DRAG_SCROLL), MS_BTN4,
                                         MS_BTN1, MS_BTN3,
                                         MS_BTN2, TD(TD_CONTROL_GESTURE) ),
         // Mirror-image of right-handed layout for lefties.
-        [LAYER_NAV_LEFT_HANDED] = LAYOUT(   LT(3, MS_BTN4), PKC_DRAG_SCROLL, MS_BTN5, MS_BTN6,
+        [LAYER_NAV_LEFT_HANDED] = LAYOUT(   LT(3, MS_BTN4), TD(TD_DRAG_SCROLL), MS_BTN5, MS_BTN6,
                                         MS_BTN3, MS_BTN1,
                                         TD(TD_CONTROL_GESTURE), MS_BTN2 ),
-    // (The control/gesture button is now the 3-in-1 TD_CONTROL_GESTURE: tap = gesture_tap_keycode
-    //  (MS_BTN7 default), hold = MO(LAYER_CONTROL), tap+hold = gesture.)
+    // (TD_CONTROL_GESTURE: tap = gesture_tap_keycode (MS_BTN7 default),
+    //  hold = pointing-device gesture, tap+hold = MO(LAYER_CONTROL).
+    //  TD_DRAG_SCROLL: tap = drag_scroll_tap_keycode (MS_BTN8 default),
+    //  hold = drag scroll -- it replaces the old PKC_DRAG_SCROLL key.)
     // Layer for all of the customization options.
     [LAYER_CONTROL] = LAYOUT(           PKC_BLINKY_DPI_CONFIG, PKC_ADJUST_LED_BRIGHTNESS, PKC_TGL_VERT_SCRL, PKC_TGL_HORIZ_SCRL,
                                         PKC_TGL_MIRROR, PKC_TGL_DRAG_SCRL,
@@ -277,7 +279,7 @@ const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
     [7] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ )
 };
 
-/* 3-in-1 control/gesture key (TD_CONTROL_GESTURE), defined in gesture_mode.c:
+/* 3-in-1 control/gesture key (TD_CONTROL_GESTURE), defined in tap_dance.c:
  *   single tap    -> user_config.gesture_tap_keycode (MS_BTN7 default, VIA-settable)
  *   single hold   -> pointing-device gesture mode
  *   tap then hold -> MO(LAYER_CONTROL) for the duration of the hold */
@@ -286,6 +288,10 @@ tap_dance_action_t tap_dance_actions[] = {
                                      .on_dance_finished = cg_fin,
                                      .on_reset          = cg_rst },
                               .user_data = (void *)&user_config.gesture_tap_keycode },
+    [TD_DRAG_SCROLL]     = { .fn = { .on_each_tap       = ds_press,
+                                     .on_dance_finished = ds_fin,
+                                     .on_reset          = ds_rst },
+                              .user_data = (void *)&user_config.drag_scroll_tap_keycode },
 };
 
 /* Per-key tapping term: only the 3-in-1 key needs a longer window, everything
@@ -294,6 +300,8 @@ uint16_t get_tapping_term(uint16_t keycode, keyrecord_t *record) {
     switch (keycode) {
         case TD(TD_CONTROL_GESTURE):
             return TD_CONTROL_GESTURE_TERM;
+        case TD(TD_DRAG_SCROLL):
+            return TD_DRAG_SCROLL_TERM;
         default:
             return TAPPING_TERM;
     }
@@ -346,7 +354,8 @@ void eeconfig_init_user(void) {
     user_config.vertical_scroll_arrows = false;     // False = Scroll events, True = up/down arrows.
     user_config.drag_scroll_mode = false;           // Hold to activate.
     user_config.led_brightness = 1;                 // Dimmest visible level by default (0 = off).
-    user_config.gesture_tap_keycode = MS_BTN7;    // Tap of the gesture key.
+    user_config.gesture_tap_keycode = MS_BTN7;      // Tap of the gesture key.
+    user_config.drag_scroll_tap_keycode = MS_BTN8;  // Tap of the drag-scroll key.
 
     eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
 
@@ -479,9 +488,10 @@ void suspend_power_down_user(void) {
     trackball_sleep_now();
 }
 
-/* Host resume: power the trackball back on, ready to use immediately. */
 void suspend_wakeup_init_user(void) {
-    trackball_wake_now();
+    if (s_trackball_asleep) {
+        rgblight_disable_noeeprom();
+    }
 }
 
 void keyboard_post_init_user(void) {
@@ -523,7 +533,7 @@ void keyboard_post_init_user(void) {
     /* An erased/garbage block reads as 0xFFFFFFFF (or a corrupt led_brightness);
        reseed the board defaults and persist them so the gesture keycode and
        lighting stay sane. */
-    if (user_config.raw == 0xFFFFFFFF || user_config.led_brightness > 5) {
+    if (user_config.raw == 0xFFFFFFFFFFFFFFFFULL || user_config.led_brightness > 5) {
         user_config.raw = 0;
         user_config.left_handed = true;
         user_config.horizontal_scroll_arrows = false;
@@ -531,6 +541,7 @@ void keyboard_post_init_user(void) {
         user_config.drag_scroll_mode = false;
         user_config.led_brightness = 1;             // Dimmest visible level (0 = off).
         user_config.gesture_tap_keycode = MS_BTN7;
+        user_config.drag_scroll_tap_keycode = MS_BTN8;
         eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
     }
 
@@ -1234,6 +1245,7 @@ enum via_scroll_accel_ids {
     id_scroll_accel_gesture_tap_keycode = 5,
     id_scroll_accel_enabled = 6,
     id_scroll_accel_growth_rate = 7,
+    id_scroll_accel_drag_scroll_tap_keycode = 8,
 };
 
 /* Separate VIA channel for DPI so it never mixes with the scroll UI. The web
@@ -1316,6 +1328,11 @@ static void scroll_accel_config_set_value(uint8_t *data) {
             user_config.gesture_tap_keycode = kc;
             break;
         }
+        case id_scroll_accel_drag_scroll_tap_keycode: {
+            uint16_t kc = ((uint16_t)value_data[0] << 8) | value_data[1];
+            user_config.drag_scroll_tap_keycode = kc;
+            break;
+        }
     }
 
     /* Persist immediately so a value change survives a reboot even if the host
@@ -1366,6 +1383,12 @@ static void scroll_accel_config_get_value(uint8_t *data) {
         }
         case id_scroll_accel_gesture_tap_keycode: {
             uint16_t kc = user_config.gesture_tap_keycode;
+            value_data[0] = kc >> 8;
+            value_data[1] = kc & 0xFF;
+            break;
+        }
+        case id_scroll_accel_drag_scroll_tap_keycode: {
+            uint16_t kc = user_config.drag_scroll_tap_keycode;
             value_data[0] = kc >> 8;
             value_data[1] = kc & 0xFF;
             break;
