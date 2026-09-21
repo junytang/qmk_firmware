@@ -87,13 +87,24 @@ typedef struct {
     uint8_t  active_preset;
 } dpi_config_t;
 
+/* Auto-sleep timeout, in minutes of idle before the trackball sleeps.
+   Stored raw as a minute count; SLEEP_UI_MIN_MIN..SLEEP_UI_MAX_MIN are the
+   only legal values, so 0 (all-zero / invalid-datablock read) and values
+   above the max (erased 0xFFFF) are both caught as uninitialized/corrupt by
+   the guard in keyboard_post_init_user. 0 is deliberately NOT offered as a
+   "never sleep" value in the VIA menu: it must stay reserved as the
+   uninitialized sentinel (same convention as g_scroll_accel_config). */
+typedef struct {
+    uint16_t timeout_min;
+} sleep_config_t;
+
 scroll_accel_config_t g_scroll_accel_config = {
     .enabled = 1,
     .offset = 220.0f,
     .takeoff = 0.03f,
     .growth_rate = 0.012f,
-    .limit = 1.0f,
-    .limit_upper = 4.0f,
+    .limit = 1.3f,
+    .limit_upper = 5.0f,
 };
 
 dpi_config_t g_dpi_config = {
@@ -101,21 +112,32 @@ dpi_config_t g_dpi_config = {
     .active_preset = 1,
 };
 
-/* Both persistent structs live in the EECONFIG user-data block
+sleep_config_t g_sleep_config = {
+    .timeout_min = TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN,
+};
+
+/* All persistent structs live in the EECONFIG user-data block
    (EECONFIG_USER_DATA_SIZE, config.h), via eeconfig_read_user_datablock /
    eeconfig_update_user_datablock -- matching users/junytang/ploopy_via.c.
    Once EECONFIG_USER_DATA_SIZE > 0 the legacy eeconfig_read_user /
    eeconfig_update_user are unavailable, so user_config and the scroll config
    must both use the datablock API. user_config occupies the first bytes; the
-   scroll config follows it. This block is separate from the VIA custom-config
-   region, so it does not collide with the drashna/pointing_device_accel module. */
+   scroll config follows it, then the DPI config, then the sleep timeout.
+   Appending (never re-ordering) keeps existing EEPROM contents valid when a
+   new struct is added: only the fresh tail bytes change meaning, and the
+   init guards reseed them. This block is separate from the VIA custom-config
+   region, so it does not collide with the drashna/pointing_device_accel
+   module. */
 #define USER_CONFIG_EEPROM_OFFSET 0
 #define SCROLL_ACCEL_EEPROM_OFFSET (USER_CONFIG_EEPROM_OFFSET + sizeof(user_config_t))
 #define DPI_EEPROM_OFFSET (SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t))
+#define SLEEP_EEPROM_OFFSET (DPI_EEPROM_OFFSET + sizeof(dpi_config_t))
 _Static_assert(SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 _Static_assert(DPI_EEPROM_OFFSET + sizeof(dpi_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config + dpi_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
+_Static_assert(SLEEP_EEPROM_OFFSET + sizeof(sleep_config_t) <= EECONFIG_USER_DATA_SIZE,
+                "user_config + scroll_accel_config + dpi_config + sleep_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 
 /* Per-param real ranges for VIA projection (must match aplus.json "options"). */
 #define SCROLL_ACCEL_R_MIN_OFFSET 0.0f
@@ -129,8 +151,19 @@ _Static_assert(DPI_EEPROM_OFFSET + sizeof(dpi_config_t) <= EECONFIG_USER_DATA_SI
 #define SCROLL_ACCEL_R_MIN_LIMIT_UPPER 1.0f
 #define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
 
+/* Real range for the VIA auto-sleep timeout control (minutes). The max is
+   > 255, so the aplus.json "options" range is encoded by VIA as 2
+   big-endian bytes -- sleep_config_set_value / _get_value must match that
+   byte order. 0 is excluded: it is the EEPROM-uninitialized sentinel. */
+#define SLEEP_UI_MIN_MIN 1
+#define SLEEP_UI_MAX_MIN 1440 /* 24 h */
+
 void scroll_accel_rebuild_lut(void);
 static void scroll_accel_config_update(void);
+
+static void sleep_config_update(void);
+static void sleep_config_set_value(uint8_t *data);
+static void sleep_config_get_value(uint8_t *data);
 
 static void dpi_apply(void);
 static void dpi_config_update(void);
@@ -367,8 +400,8 @@ void eeconfig_init_user(void) {
         .offset = 220.0f,
         .takeoff = 0.03f,
         .growth_rate = 0.012f,
-        .limit = 1.0f,
-        .limit_upper = 4.0f,
+        .limit = 1.3f,
+        .limit_upper = 5.0f,
     };
     scroll_accel_config_update();
 
@@ -378,6 +411,12 @@ void eeconfig_init_user(void) {
         .active_preset = 1,
     };
     dpi_config_update();
+
+    /* Seed the auto-sleep timeout (minutes) too, alongside the other blocks. */
+    g_sleep_config = (sleep_config_t){
+        .timeout_min = TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN,
+    };
+    sleep_config_update();
 }
 
 void keyboard_pre_init_user(void) {
@@ -477,7 +516,13 @@ static void trackball_wake(void) {
 }
 
 void housekeeping_task_user(void) {
-    if (!s_trackball_asleep && timer_elapsed32(s_trackball_last_activity) > TRACKBALL_SLEEP_TIMEOUT_MS) {
+    /* Timeout comes from the VIA-configurable g_sleep_config (minutes,
+       persisted in the EECONFIG user-data block); the compile-time
+       TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN only seeds it on EEPROM init.
+       (uint32_t)min * 60000 cannot overflow for the legal 1..1440 range. */
+    uint32_t timeout_ms = (uint32_t)g_sleep_config.timeout_min * 60u * 1000u;
+    if (!s_trackball_asleep && timeout_ms > 0 &&
+        timer_elapsed32(s_trackball_last_activity) > timeout_ms) {
         trackball_sleep_now();
     }
 }
@@ -569,8 +614,8 @@ void keyboard_post_init_user(void) {
             .offset = 220.0f,
             .takeoff = 0.03f,
             .growth_rate = 0.012f,
-            .limit = 1.0f,
-            .limit_upper = 4.0f,
+            .limit = 1.3f,
+            .limit_upper = 5.0f,
         };
         scroll_accel_config_update();
     }
@@ -590,6 +635,18 @@ void keyboard_post_init_user(void) {
         dpi_config_update();
     }
     dpi_apply();
+
+    /* Load the auto-sleep timeout (minutes) from the EECONFIG user-data block.
+       Catch both ways the tail of the block can be invalid: an invalid
+       datablock reads back as all-zero (0 -> below SLEEP_UI_MIN_MIN) and an
+       erased-but-never-written region reads as 0xFFFF (above
+       SLEEP_UI_MAX_MIN). Either way, reseed the default and persist it. */
+    eeconfig_read_user_datablock(&g_sleep_config, SLEEP_EEPROM_OFFSET, sizeof(sleep_config_t));
+    if (g_sleep_config.timeout_min < SLEEP_UI_MIN_MIN ||
+        g_sleep_config.timeout_min > SLEEP_UI_MAX_MIN) {
+        g_sleep_config.timeout_min = TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN;
+        sleep_config_update();
+    }
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
@@ -1263,6 +1320,17 @@ enum via_dpi_ids {
     id_dpi_preset4 = 6,
 };
 
+/* Separate VIA channel for the auto-sleep timeout so it never mixes with the
+   scroll or DPI UI. The web menu (aplus.json "menus" -> Settings -> Power)
+   drives it with channel 27 and the value ids below. */
+enum via_sleep_channel {
+    id_sleep = 27,
+};
+
+enum via_sleep_ids {
+    id_sleep_timeout_min = 1,
+};
+
 /* DPI presets exposed to the web UI as real CPI values. The active preset
    index is 0..4; the five preset controls are plain uint16 ranges. */
 #define DPI_UI_MIN_PRESET 100
@@ -1461,6 +1529,48 @@ static void dpi_config_get_value(uint8_t *data) {
     }
 }
 
+static void sleep_config_update(void) {
+    eeconfig_update_user_datablock(&g_sleep_config, SLEEP_EEPROM_OFFSET, sizeof(sleep_config_t));
+}
+
+/* The aplus.json range for this control is [1, 1440]; because the max is
+   > 255 VIA encodes it as 2 BIG-endian bytes (MSB first) -- identical to the
+   offset / limit / DPI-preset controls above. Values outside the legal range
+   (e.g. a stale UI sending 0) are clamped, never stored: 0 must stay
+   reserved as the EEPROM-uninitialized sentinel. */
+static void sleep_config_set_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_sleep_timeout_min: {
+            uint16_t v = ((uint16_t)value_data[0] << 8) | value_data[1];
+            if (v < SLEEP_UI_MIN_MIN) v = SLEEP_UI_MIN_MIN;
+            if (v > SLEEP_UI_MAX_MIN) v = SLEEP_UI_MAX_MIN;
+            g_sleep_config.timeout_min = v;
+            break;
+        }
+    }
+
+    /* Persist immediately so a value change survives a reboot even if the host
+       does not follow up with an explicit id_custom_save. */
+    sleep_config_update();
+}
+
+static void sleep_config_get_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_sleep_timeout_min: {
+            uint16_t v = g_sleep_config.timeout_min;
+            value_data[0] = v >> 8;     /* big-endian, matches the set path */
+            value_data[1] = v & 0xFF;
+            break;
+        }
+    }
+}
+
 /* Keyboard-level handler for the scroll-accel custom channel. Unhandled channels
    are passed back as id_unhandled (matches the core VIA dispatch contract). */
 void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
@@ -1499,6 +1609,24 @@ void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
                 break;
             case id_custom_save:
                 dpi_config_update();
+                break;
+            default:
+                *command_id = id_unhandled;
+                break;
+        }
+        return;
+    }
+
+    if (*channel_id == id_sleep) {
+        switch (*command_id) {
+            case id_custom_set_value:
+                sleep_config_set_value(value_and_data);
+                break;
+            case id_custom_get_value:
+                sleep_config_get_value(value_and_data);
+                break;
+            case id_custom_save:
+                sleep_config_update();
                 break;
             default:
                 *command_id = id_unhandled;

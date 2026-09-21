@@ -20,11 +20,16 @@
 
 #define DYNAMIC_KEYMAP_LAYER_COUNT 8
 
-/* Trackball auto-sleep. After TRACKBALL_SLEEP_TIMEOUT_MS with no key press,
-   ball/button motion or wheel movement, the trackball stops tracking: the
-   cursor is frozen and the TMAG5273 wheel I2C polls are skipped entirely.
-   Any key press wakes it. */
-#define TRACKBALL_SLEEP_TIMEOUT_MS 120 * 60 * 1000 // 120 minutes of idle before sleeping
+/* Trackball auto-sleep default: after TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN
+   minutes with no key press, ball/button motion or wheel movement, the
+   trackball stops tracking: the cursor is frozen and the PMW3360 / TMAG5273
+   wheels are powered down. Any key press wakes it.
+
+   This is only the seed value written on EEPROM init/reset. The active
+   timeout is configurable at runtime from the VIA menu (Settings -> Power ->
+   Auto-sleep timeout, custom channel 27) and persisted in the EECONFIG
+   user-data block; see g_sleep_config in keymap.c. */
+#define TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN 120
 
 /* 3-in-1 key (TD_CONTROL_GESTURE): per-key tapping term.
  *

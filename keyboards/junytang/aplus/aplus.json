@@ -168,6 +168,17 @@
               "type": "range"
             }
           ]
+        },
+        {
+          "label": "Power",
+          "content": [
+            {
+              "content": ["id_sleep_timeout_min", 27, 1],
+              "label": "Auto-sleep timeout (minutes)",
+              "options": [1, 1440],
+              "type": "range"
+            }
+          ]
         }
       ]
     }
