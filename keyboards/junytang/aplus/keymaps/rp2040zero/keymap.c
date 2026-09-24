@@ -87,15 +87,34 @@ typedef struct {
     uint8_t  active_preset;
 } dpi_config_t;
 
-/* Auto-sleep timeout, in minutes of idle before the trackball sleeps.
-   Stored raw as a minute count; SLEEP_UI_MIN_MIN..SLEEP_UI_MAX_MIN are the
-   only legal values, so 0 (all-zero / invalid-datablock read) and values
-   above the max (erased 0xFFFF) are both caught as uninitialized/corrupt by
-   the guard in keyboard_post_init_user. 0 is deliberately NOT offered as a
-   "never sleep" value in the VIA menu: it must stay reserved as the
-   uninitialized sentinel (same convention as g_scroll_accel_config). */
+/* Legal range / default for the VIA auto-sleep controls (defined up here
+   because both the global initializer below and the init guard use them).
+   The timeout max is > 255, so the aplus.json "options" range is encoded by
+   VIA as 2 big-endian bytes -- sleep_config_set_value / _get_value must match
+   that byte order. The enabled toggle is a plain 1-byte 0/1.
+   0 is excluded from the timeout range: it is the EEPROM-uninitialized
+   sentinel, and "never sleep" is expressed with enabled=0 instead. */
+#define SLEEP_UI_MIN_MIN 1
+#define SLEEP_UI_MAX_MIN 1440 /* 24 h */
+#define SLEEP_DEFAULT_ENABLED 1 /* factory default: auto-sleep on */
+
+/* Auto-sleep config: master on/off switch plus idle timeout in minutes
+   before the trackball sleeps.
+   timeout_min is stored raw as a minute count; SLEEP_UI_MIN_MIN..
+   SLEEP_UI_MAX_MIN are the only legal values, so 0 (all-zero /
+   invalid-datablock read) and values above the max (erased 0xFFFF) are both
+   caught as uninitialized/corrupt by the guard in keyboard_post_init_user.
+   0 is deliberately NOT offered as a "never sleep" value in the VIA menu: it
+   must stay reserved as the uninitialized sentinel (same convention as
+   g_scroll_accel_config); "never sleep" is what enabled=0 is for.
+   enabled is 0/1; any other byte value (e.g. an erased tail) is reseeded by
+   the same guard.
+   NOTE: the trailing uint8_t pads the struct to 4 bytes, which lands the
+   block at exactly EECONFIG_USER_DATA_SIZE (48). If anything grows, bump it
+   in rp2040zero/config.h -- the _Static_assert below fails loudly. */
 typedef struct {
     uint16_t timeout_min;
+    uint8_t  enabled;
 } sleep_config_t;
 
 scroll_accel_config_t g_scroll_accel_config = {
@@ -114,6 +133,7 @@ dpi_config_t g_dpi_config = {
 
 sleep_config_t g_sleep_config = {
     .timeout_min = TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN,
+    .enabled     = SLEEP_DEFAULT_ENABLED,
 };
 
 /* All persistent structs live in the EECONFIG user-data block
@@ -122,7 +142,7 @@ sleep_config_t g_sleep_config = {
    Once EECONFIG_USER_DATA_SIZE > 0 the legacy eeconfig_read_user /
    eeconfig_update_user are unavailable, so user_config and the scroll config
    must both use the datablock API. user_config occupies the first bytes; the
-   scroll config follows it, then the DPI config, then the sleep timeout.
+   scroll config follows it, then the DPI config, then the sleep config.
    Appending (never re-ordering) keeps existing EEPROM contents valid when a
    new struct is added: only the fresh tail bytes change meaning, and the
    init guards reseed them. This block is separate from the VIA custom-config
@@ -150,13 +170,6 @@ _Static_assert(SLEEP_EEPROM_OFFSET + sizeof(sleep_config_t) <= EECONFIG_USER_DAT
 #define SCROLL_ACCEL_R_MAX_LIMIT 2.0f   /* >1.0 = 低速比 1:1 更快（慢速滚动提速） */
 #define SCROLL_ACCEL_R_MIN_LIMIT_UPPER 1.0f
 #define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
-
-/* Real range for the VIA auto-sleep timeout control (minutes). The max is
-   > 255, so the aplus.json "options" range is encoded by VIA as 2
-   big-endian bytes -- sleep_config_set_value / _get_value must match that
-   byte order. 0 is excluded: it is the EEPROM-uninitialized sentinel. */
-#define SLEEP_UI_MIN_MIN 1
-#define SLEEP_UI_MAX_MIN 1440 /* 24 h */
 
 void scroll_accel_rebuild_lut(void);
 static void scroll_accel_config_update(void);
@@ -412,9 +425,11 @@ void eeconfig_init_user(void) {
     };
     dpi_config_update();
 
-    /* Seed the auto-sleep timeout (minutes) too, alongside the other blocks. */
+    /* Seed the auto-sleep config (on/off + minutes) too, alongside the
+       other blocks. */
     g_sleep_config = (sleep_config_t){
         .timeout_min = TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN,
+        .enabled     = SLEEP_DEFAULT_ENABLED,
     };
     sleep_config_update();
 }
@@ -442,6 +457,23 @@ static bool     s_pmw_off                 = false;
    not polled while asleep, so the next delta would be measured against where
    they were minutes ago and become one huge burst of scroll. */
 static bool s_wheel_resync_pending = false;
+
+/* Background sampling of PMW3360 SQUAL / shutter / pixel stats for the VIA
+   Sensor menu. Toggle ON (VIA): reset the accumulators and sample every
+   SENSOR_SAMPLE_MS in housekeeping_task_user while the sensor is awake.
+   Toggle OFF: freeze; GET returns the session average. The web ranges are
+   hidden via showIf while sampling is on (VIA only fetches custom values
+   on connect, so the averages appear after the page is reloaded with the
+   toggle off). */
+#define SENSOR_SAMPLE_MS 500
+static bool     s_sensor_sampling  = false;
+static uint64_t s_squal_sum       = 0;
+static uint64_t s_shutter_sum     = 0;
+static uint64_t s_pixsum_sum      = 0; /* REG_Raw_Data_Sum 0x08 */
+static uint64_t s_max_sum         = 0; /* REG_Maximum_Raw_data 0x09 */
+static uint64_t s_min_sum         = 0; /* REG_Minimum_Raw_data 0x0a */
+static uint32_t s_sample_count    = 0;
+static uint32_t s_sensor_sample_last = 0;
 
 /* Put the trackball to sleep: freeze the cursor, blank the underglow, truly
    power down the PMW3360 (REG_Shutdown) and cut the two TMAG5273 wheels from
@@ -516,13 +548,32 @@ static void trackball_wake(void) {
 }
 
 void housekeeping_task_user(void) {
-    /* Timeout comes from the VIA-configurable g_sleep_config (minutes,
-       persisted in the EECONFIG user-data block); the compile-time
+    /* Sensor diagnostics: sample SQUAL + shutter + pixel stats while the VIA
+       toggle is on and the PMW is awake. Runs before the sleep early-return
+       so sampling still works when auto-sleep is disabled. */
+    if (s_sensor_sampling && !s_trackball_asleep && !s_pmw_off) {
+        if (timer_elapsed32(s_sensor_sample_last) >= SENSOR_SAMPLE_MS) {
+            s_sensor_sample_last = timer_read32();
+            s_squal_sum   += pmw33xx_read(0, REG_SQUAL);
+            s_shutter_sum += ((uint16_t)pmw33xx_read(0, REG_Shutter_Upper) << 8) |
+                              pmw33xx_read(0, REG_Shutter_Lower);
+            s_pixsum_sum  += pmw33xx_read(0, REG_Raw_Data_Sum);
+            s_max_sum     += pmw33xx_read(0, REG_Maximum_Raw_data);
+            s_min_sum     += pmw33xx_read(0, REG_Minimum_Raw_data);
+            s_sample_count++;
+        }
+    }
+
+    /* The auto-sleep switch (g_sleep_config.enabled, VIA-settable) gates the
+       idle timer entirely; the timeout comes from g_sleep_config.timeout_min
+       (minutes, persisted in the EECONFIG user-data block). The compile-time
        TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN only seeds it on EEPROM init.
        (uint32_t)min * 60000 cannot overflow for the legal 1..1440 range. */
+    if (!g_sleep_config.enabled || s_trackball_asleep) {
+        return;
+    }
     uint32_t timeout_ms = (uint32_t)g_sleep_config.timeout_min * 60u * 1000u;
-    if (!s_trackball_asleep && timeout_ms > 0 &&
-        timer_elapsed32(s_trackball_last_activity) > timeout_ms) {
+    if (timeout_ms > 0 && timer_elapsed32(s_trackball_last_activity) > timeout_ms) {
         trackball_sleep_now();
     }
 }
@@ -636,15 +687,24 @@ void keyboard_post_init_user(void) {
     }
     dpi_apply();
 
-    /* Load the auto-sleep timeout (minutes) from the EECONFIG user-data block.
-       Catch both ways the tail of the block can be invalid: an invalid
-       datablock reads back as all-zero (0 -> below SLEEP_UI_MIN_MIN) and an
-       erased-but-never-written region reads as 0xFFFF (above
-       SLEEP_UI_MAX_MIN). Either way, reseed the default and persist it. */
+    /* Load the auto-sleep config (on/off + timeout in minutes) from the
+       EECONFIG user-data block.
+       Catch the ways the tail of the block can be invalid:
+       - timeout out of range (all-zero invalid-datablock read, or erased
+         0xFFFF) means the WHOLE struct is fresh/unread -> reseed both
+         fields, so an uninitialized block never boots with sleep disabled;
+       - timeout fine but the enabled byte > 1 (corrupt tail from a layout
+         change) -> reseed only the enabled byte, keeping the user's timeout. */
     eeconfig_read_user_datablock(&g_sleep_config, SLEEP_EEPROM_OFFSET, sizeof(sleep_config_t));
     if (g_sleep_config.timeout_min < SLEEP_UI_MIN_MIN ||
         g_sleep_config.timeout_min > SLEEP_UI_MAX_MIN) {
-        g_sleep_config.timeout_min = TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN;
+        g_sleep_config = (sleep_config_t){
+            .timeout_min = TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN,
+            .enabled     = SLEEP_DEFAULT_ENABLED,
+        };
+        sleep_config_update();
+    } else if (g_sleep_config.enabled > 1) {
+        g_sleep_config.enabled = SLEEP_DEFAULT_ENABLED;
         sleep_config_update();
     }
 
@@ -1329,7 +1389,26 @@ enum via_sleep_channel {
 
 enum via_sleep_ids {
     id_sleep_timeout_min = 1,
+    id_sleep_enabled = 2,
 };
+
+/* Separate VIA channel for the sensor diagnostics. The web menu
+   (aplus.json "menus" -> Settings -> Sensor) drives it with channel 28. */
+enum via_sensor_channel {
+    id_sensor = 28,
+};
+
+enum via_sensor_ids {
+    id_sensor_squal    = 1,
+    id_sensor_shutter  = 2,
+    id_sensor_sampling = 3,
+    id_sensor_max      = 4,
+    id_sensor_min      = 5,
+    id_sensor_pixsum   = 7,
+};
+
+/* Sampling state (s_sensor_sampling and the sum/count accumulators) is
+   declared with the other statics near trackball_sleep_now(). */
 
 /* DPI presets exposed to the web UI as real CPI values. The active preset
    index is 0..4; the five preset controls are plain uint16 ranges. */
@@ -1533,11 +1612,13 @@ static void sleep_config_update(void) {
     eeconfig_update_user_datablock(&g_sleep_config, SLEEP_EEPROM_OFFSET, sizeof(sleep_config_t));
 }
 
-/* The aplus.json range for this control is [1, 1440]; because the max is
-   > 255 VIA encodes it as 2 BIG-endian bytes (MSB first) -- identical to the
-   offset / limit / DPI-preset controls above. Values outside the legal range
-   (e.g. a stale UI sending 0) are clamped, never stored: 0 must stay
-   reserved as the EEPROM-uninitialized sentinel. */
+/* The aplus.json timeout range is [1, 1440]; because the max is > 255 VIA
+   encodes it as 2 BIG-endian bytes (MSB first) -- identical to the offset /
+   limit / DPI-preset controls above. The enabled control is a 1-byte toggle
+   (options [0, 1], same as id_scroll_accel_enabled).
+   Timeout values outside the legal range (e.g. a stale UI sending 0) are
+   clamped, never stored: 0 must stay reserved as the EEPROM-uninitialized
+   sentinel. */
 static void sleep_config_set_value(uint8_t *data) {
     uint8_t *value_id = &(data[0]);
     uint8_t *value_data = &(data[1]);
@@ -1548,6 +1629,15 @@ static void sleep_config_set_value(uint8_t *data) {
             if (v < SLEEP_UI_MIN_MIN) v = SLEEP_UI_MIN_MIN;
             if (v > SLEEP_UI_MAX_MIN) v = SLEEP_UI_MAX_MIN;
             g_sleep_config.timeout_min = v;
+            break;
+        }
+        case id_sleep_enabled: {
+            g_sleep_config.enabled = value_data[0] ? 1 : 0;
+            /* Switching auto-sleep off also wakes a board that is currently
+               asleep (otherwise it would sit dark until the next key press). */
+            if (!g_sleep_config.enabled && s_trackball_asleep) {
+                trackball_wake_now();
+            }
             break;
         }
     }
@@ -1568,6 +1658,81 @@ static void sleep_config_get_value(uint8_t *data) {
             value_data[1] = v & 0xFF;
             break;
         }
+        case id_sleep_enabled: {
+            value_data[0] = g_sleep_config.enabled ? 1 : 0;
+            value_data[1] = 0;
+            break;
+        }
+    }
+}
+
+/* Sensor channel: the sampling toggle is writable; the value controls are
+   read-only and return the session average (sum / count). SQUAL, Max, Min
+   and pixel-sum are 0..255 (1 byte in value_data[0]); shutter is 0..65535
+   (2-byte big-endian in value_data[0..1]), matching aplus.json. */
+static void sensor_config_set_value(uint8_t *data) {
+    uint8_t *value_id   = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_sensor_sampling: {
+            bool on = value_data[0] ? 1 : 0;
+            if (on && !s_sensor_sampling) {
+                /* Fresh session: drop any previous averages. */
+                s_squal_sum         = 0;
+                s_shutter_sum       = 0;
+                s_pixsum_sum        = 0;
+                s_max_sum           = 0;
+                s_min_sum           = 0;
+                s_sample_count      = 0;
+                s_sensor_sample_last = timer_read32();
+            }
+            s_sensor_sampling = on;
+            break;
+        }
+        /* Value displays are read-only: ignore UI drags. */
+    }
+}
+
+static void sensor_config_get_value(uint8_t *data) {
+    uint8_t *value_id   = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_sensor_squal: {
+            uint16_t avg = s_sample_count ? (uint16_t)(s_squal_sum / s_sample_count) : 0;
+            value_data[0] = avg;
+            value_data[1] = 0;
+            break;
+        }
+        case id_sensor_shutter: {
+            uint16_t avg = s_sample_count ? (uint16_t)(s_shutter_sum / s_sample_count) : 0;
+            value_data[0] = avg >> 8;
+            value_data[1] = avg & 0xFF;
+            break;
+        }
+        case id_sensor_max: {
+            uint16_t avg = s_sample_count ? (uint16_t)(s_max_sum / s_sample_count) : 0;
+            value_data[0] = avg;
+            value_data[1] = 0;
+            break;
+        }
+        case id_sensor_min: {
+            uint16_t avg = s_sample_count ? (uint16_t)(s_min_sum / s_sample_count) : 0;
+            value_data[0] = avg;
+            value_data[1] = 0;
+            break;
+        }
+        case id_sensor_pixsum: {
+            uint16_t avg = s_sample_count ? (uint16_t)(s_pixsum_sum / s_sample_count) : 0;
+            value_data[0] = avg;
+            value_data[1] = 0;
+            break;
+        }
+        case id_sensor_sampling:
+            value_data[0] = s_sensor_sampling ? 1 : 0;
+            value_data[1] = 0;
+            break;
     }
 }
 
@@ -1627,6 +1792,23 @@ void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
                 break;
             case id_custom_save:
                 sleep_config_update();
+                break;
+            default:
+                *command_id = id_unhandled;
+                break;
+        }
+        return;
+    }
+
+    if (*channel_id == id_sensor) {
+        switch (*command_id) {
+            case id_custom_set_value:
+                sensor_config_set_value(value_and_data);
+                break;
+            case id_custom_get_value:
+                sensor_config_get_value(value_and_data);
+                break;
+            case id_custom_save:
                 break;
             default:
                 *command_id = id_unhandled;

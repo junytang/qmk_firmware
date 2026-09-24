@@ -173,10 +173,62 @@
           "label": "Power",
           "content": [
             {
+              "content": ["id_sleep_enabled", 27, 2],
+              "label": "Auto-sleep enabled",
+              "options": [0, 1],
+              "type": "toggle"
+            },
+            {
               "content": ["id_sleep_timeout_min", 27, 1],
               "label": "Auto-sleep timeout (minutes)",
               "options": [1, 1440],
               "type": "range"
+            }
+          ]
+        },
+        {
+          "label": "Sensor",
+          "content": [
+            {
+              "content": ["id_sensor_sampling", 28, 3],
+              "label": "Background sampling",
+              "options": [0, 1],
+              "type": "toggle"
+            },
+            {
+              "content": ["id_sensor_squal", 28, 1],
+              "label": "SQUAL average",
+              "options": [0, 255],
+              "type": "range",
+              "showIf": "{id_sensor_sampling} == 0"
+            },
+            {
+              "content": ["id_sensor_shutter", 28, 2],
+              "label": "Shutter average",
+              "options": [0, 65535],
+              "type": "range",
+              "showIf": "{id_sensor_sampling} == 0"
+            },
+            {
+              "content": ["id_sensor_max", 28, 4],
+              "label": "Max pixel average",
+              "options": [0, 255],
+              "type": "range",
+              "showIf": "{id_sensor_sampling} == 0"
+            },
+            {
+              "content": ["id_sensor_min", 28, 5],
+              "label": "Min pixel average",
+              "options": [0, 255],
+              "type": "range",
+              "showIf": "{id_sensor_sampling} == 0"
+            },
+            {
+              "content": ["id_sensor_pixsum", 28, 7],
+              "label": "Pixel sum average",
+              "options": [0, 255],
+              "type": "range",
+              "showIf": "{id_sensor_sampling} == 0"
             }
           ]
         }

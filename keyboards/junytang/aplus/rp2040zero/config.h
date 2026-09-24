@@ -56,7 +56,8 @@
 /* user_config (gesture keycode + board settings, 8 bytes), the scroll-accel
    config (1 bool + 5 floats, 24 bytes with padding), the DPI config
    (5x uint16 presets + uint8 active preset = 12 bytes with padding) and the
-   auto-sleep timeout (uint16 minutes = 2 bytes) are all persisted in the
+   auto-sleep config (uint16 minutes + uint8 enabled = 4 bytes with padding)
+   are all persisted in the
    EECONFIG user-data block via eeconfig_read_user_datablock /
    eeconfig_update_user_datablock in keymap.c, following the pattern in
    users/junytang/ploopy_via.c. This keeps them out of the VIA custom-config
@@ -65,13 +66,13 @@
    redefine VIA_EEPROM_CUSTOM_CONFIG_SIZE, avoiding that module's
    "already defined" #error / per-build-unit #pragma message.
    Layout: user_config at offset 0 (8B), scroll config at offset 8 (24B),
-   DPI config at offset 32 (12B), sleep timeout at offset 44 (2B) => 46B used.
-   This must be >= 46; grow it if any struct grows. After flashing a build that
-   changes this, do a one-time EEPROM reset so eeconfig_init_user repopulates
-   everything with defaults. */
+   DPI config at offset 32 (12B), sleep config at offset 44 (4B) => 48B used.
+   This must be >= 48 (exactly full now -- grow it if any struct grows).
+   After flashing a build that changes this, do a one-time EEPROM reset so
+   eeconfig_init_user repopulates everything with defaults. */
 /* Reserved space for the persistent user blocks in keymap.c:
  *   user_config_t (8, grown to hold both configurable tap keycodes)
- * + scroll_accel_config_t (24) + dpi_config_t (12) + sleep_config_t (2) = 46.
+ * + scroll_accel_config_t (24) + dpi_config_t (12) + sleep_config_t (4) = 48.
  * Bumped 40 -> 48 when user_config_t grew; the static asserts in keymap.c
  * will fail loudly if this ever needs raising again. */
 #define EECONFIG_USER_DATA_SIZE 48

@@ -26,8 +26,8 @@
    wheels are powered down. Any key press wakes it.
 
    This is only the seed value written on EEPROM init/reset. The active
-   timeout is configurable at runtime from the VIA menu (Settings -> Power ->
-   Auto-sleep timeout, custom channel 27) and persisted in the EECONFIG
+   switch (on/off) and timeout are configurable at runtime from the VIA menu
+   (Settings -> Power, custom channel 27) and persisted in the EECONFIG
    user-data block; see g_sleep_config in keymap.c. */
 #define TRACKBALL_SLEEP_DEFAULT_TIMEOUT_MIN 120
 
