@@ -80,6 +80,18 @@
           "label": "Scroll Tuning",
           "content": [
             {
+              "content": ["id_scroll_accel_drag_divisor_h", 25, 9],
+              "label": "Drag scroll divisor H (x0.1, larger = slower)",
+              "options": [1, 2000],
+              "type": "range"
+            },
+            {
+              "content": ["id_scroll_accel_drag_divisor_v", 25, 10],
+              "label": "Drag scroll divisor V (x0.1, larger = slower)",
+              "options": [1, 2000],
+              "type": "range"
+            },
+            {
               "content": ["id_scroll_accel_enabled", 25, 6],
               "label": "Curve accel enabled",
               "options": [0, 1],
@@ -89,32 +101,37 @@
               "content": ["id_scroll_accel_offset", 25, 1],
               "label": "Offset (knee speed)",
               "options": [0, 400],
-              "type": "range"
+              "type": "range",
+              "showIf": "{id_scroll_accel_enabled} == 1"
             },
             {
               "content": ["id_scroll_accel_takeoff", 25, 2],
               "label": "Takeoff (steepness, x0.001)",
               "options": [5, 100],
-              "type": "range"
+              "type": "range",
+              "showIf": "{id_scroll_accel_enabled} == 1"
             },
             {
               "content": ["id_scroll_accel_limit", 25, 3],
               "label": "Limit (low-speed floor, x0.001)",
               "options": [500, 2000],
-              "type": "range"
+              "type": "range",
+              "showIf": "{id_scroll_accel_enabled} == 1"
             },
             {
               "content": ["id_scroll_accel_limit_upper", 25, 4],
               "label": "Limit upper (top multiplier)",
               "options": [1, 10],
-              "type": "range"
+              "type": "range",
+              "showIf": "{id_scroll_accel_enabled} == 1"
             },
 
              {
                "content": ["id_scroll_accel_growth_rate", 25, 7],
                "label": "Growth rate (top saturation, x0.001)",
                "options": [1, 100],
-               "type": "range"
+               "type": "range",
+               "showIf": "{id_scroll_accel_enabled} == 1"
              },
              {
                "content": ["id_gesture_tap_keycode", 25, 5],
@@ -196,38 +213,39 @@
               "type": "toggle"
             },
             {
+              "content": ["id_sensor_quality", 28, 8],
+              "label": " Quality score",
+              "type": "label",
+              "showIf": "{id_sensor_sampling} == 0"
+            },
+            {
               "content": ["id_sensor_squal", 28, 1],
-              "label": "SQUAL average",
-              "options": [0, 255],
-              "type": "range",
+              "label": "Register SQUAL average",
+              "type": "label",
               "showIf": "{id_sensor_sampling} == 0"
             },
             {
               "content": ["id_sensor_shutter", 28, 2],
-              "label": "Shutter average",
-              "options": [0, 65535],
-              "type": "range",
+              "label": "Register Shutter average",
+              "type": "label",
               "showIf": "{id_sensor_sampling} == 0"
             },
             {
               "content": ["id_sensor_max", 28, 4],
-              "label": "Max pixel average",
-              "options": [0, 255],
-              "type": "range",
+              "label": "Register Max pixel average",
+              "type": "label",
               "showIf": "{id_sensor_sampling} == 0"
             },
             {
               "content": ["id_sensor_min", 28, 5],
-              "label": "Min pixel average",
-              "options": [0, 255],
-              "type": "range",
+              "label": "Register Min pixel average",
+              "type": "label",
               "showIf": "{id_sensor_sampling} == 0"
             },
             {
               "content": ["id_sensor_pixsum", 28, 7],
-              "label": "Pixel sum average",
-              "options": [0, 255],
-              "type": "range",
+              "label": "Register Pixel sum average",
+              "type": "label",
               "showIf": "{id_sensor_sampling} == 0"
             }
           ]

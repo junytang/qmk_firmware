@@ -83,6 +83,13 @@ bool pmw33xx_write(uint8_t sensor, uint8_t reg_addr, uint8_t data) {
 }
 
 uint8_t pmw33xx_read(uint8_t sensor, uint8_t reg_addr) {
+    // A non-burst access exits motion-burst mode on the sensor; keep the
+    // driver flag in sync (same as pmw33xx_write) so the next
+    // pmw33xx_read_burst re-enters burst instead of reading stale state.
+    if (reg_addr != REG_Motion_Burst) {
+        in_burst[sensor] = false;
+    }
+
     if (!pmw33xx_spi_start(sensor)) {
         return 0;
     }

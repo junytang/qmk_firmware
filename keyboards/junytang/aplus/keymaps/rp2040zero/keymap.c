@@ -109,13 +109,27 @@ typedef struct {
    g_scroll_accel_config); "never sleep" is what enabled=0 is for.
    enabled is 0/1; any other byte value (e.g. an erased tail) is reseeded by
    the same guard.
-   NOTE: the trailing uint8_t pads the struct to 4 bytes, which lands the
-   block at exactly EECONFIG_USER_DATA_SIZE (48). If anything grows, bump it
-   in rp2040zero/config.h -- the _Static_assert below fails loudly. */
+   NOTE: the trailing uint8_t pads the struct to 4 bytes, which puts the end
+   of this block at 48. The drag-scroll config is appended after it, and the
+   total lands at exactly EECONFIG_USER_DATA_SIZE (56). If anything grows,
+   bump it in rp2040zero/config.h -- the _Static_assert below fails loudly. */
 typedef struct {
     uint16_t timeout_min;
     uint8_t  enabled;
 } sleep_config_t;
+
+/* Drag-scroll divisors: mouse x/y counts consumed per scroll tick. Mirrors
+   PLOOPY_DRAGSCROLL_DIVISOR_H/V but is runtime-tunable (VIA Scroll Tuning)
+   and persisted as the last block of the EECONFIG user datablock. */
+typedef struct {
+    float h;
+    float v;
+} drag_scroll_config_t;
+
+drag_scroll_config_t g_drag_scroll_config = {
+    .h = PLOOPY_DRAGSCROLL_DIVISOR_H,
+    .v = PLOOPY_DRAGSCROLL_DIVISOR_V,
+};
 
 scroll_accel_config_t g_scroll_accel_config = {
     .enabled = 1,
@@ -142,7 +156,8 @@ sleep_config_t g_sleep_config = {
    Once EECONFIG_USER_DATA_SIZE > 0 the legacy eeconfig_read_user /
    eeconfig_update_user are unavailable, so user_config and the scroll config
    must both use the datablock API. user_config occupies the first bytes; the
-   scroll config follows it, then the DPI config, then the sleep config.
+   scroll config follows it, then the DPI config, then the sleep config, then
+   the drag-scroll config.
    Appending (never re-ordering) keeps existing EEPROM contents valid when a
    new struct is added: only the fresh tail bytes change meaning, and the
    init guards reseed them. This block is separate from the VIA custom-config
@@ -152,12 +167,15 @@ sleep_config_t g_sleep_config = {
 #define SCROLL_ACCEL_EEPROM_OFFSET (USER_CONFIG_EEPROM_OFFSET + sizeof(user_config_t))
 #define DPI_EEPROM_OFFSET (SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t))
 #define SLEEP_EEPROM_OFFSET (DPI_EEPROM_OFFSET + sizeof(dpi_config_t))
+#define DRAGSCROLL_EEPROM_OFFSET (SLEEP_EEPROM_OFFSET + sizeof(sleep_config_t))
 _Static_assert(SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 _Static_assert(DPI_EEPROM_OFFSET + sizeof(dpi_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config + dpi_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 _Static_assert(SLEEP_EEPROM_OFFSET + sizeof(sleep_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config + dpi_config + sleep_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
+_Static_assert(DRAGSCROLL_EEPROM_OFFSET + sizeof(drag_scroll_config_t) <= EECONFIG_USER_DATA_SIZE,
+                "user_config + scroll_accel_config + dpi_config + sleep_config + drag_scroll_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 
 /* Per-param real ranges for VIA projection (must match aplus.json "options"). */
 #define SCROLL_ACCEL_R_MIN_OFFSET 0.0f
@@ -171,12 +189,21 @@ _Static_assert(SLEEP_EEPROM_OFFSET + sizeof(sleep_config_t) <= EECONFIG_USER_DAT
 #define SCROLL_ACCEL_R_MIN_LIMIT_UPPER 1.0f
 #define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
 
+/* Drag-scroll divisors (mouse x/y counts per scroll tick). Larger = slower.
+   Exposed in the VIA "Scroll Tuning" menu scaled x10 (0.1..200.0). */
+#define DRAGSCROLL_R_MIN 0.1f
+#define DRAGSCROLL_R_MAX 200.0f
+#define DRAGSCROLL_UI_SCALE 10
+
 void scroll_accel_rebuild_lut(void);
 static void scroll_accel_config_update(void);
 
 static void sleep_config_update(void);
 static void sleep_config_set_value(uint8_t *data);
 static void sleep_config_get_value(uint8_t *data);
+
+static void drag_scroll_config_update(void);
+static void drag_scroll_apply(void);
 
 static void dpi_apply(void);
 static void dpi_config_update(void);
@@ -432,6 +459,16 @@ void eeconfig_init_user(void) {
         .enabled     = SLEEP_DEFAULT_ENABLED,
     };
     sleep_config_update();
+
+    /* Seed the drag-scroll divisors (the compile-time macro defaults) so a
+       factory wipe never leaves them at 0 (division by zero in the scroll
+       accumulator) or all-0xFF garbage. */
+    g_drag_scroll_config = (drag_scroll_config_t){
+        .h = PLOOPY_DRAGSCROLL_DIVISOR_H,
+        .v = PLOOPY_DRAGSCROLL_DIVISOR_V,
+    };
+    drag_scroll_config_update();
+    drag_scroll_apply();
 }
 
 void keyboard_pre_init_user(void) {
@@ -547,6 +584,43 @@ static void trackball_wake(void) {
     trackball_wake_now();
 }
 
+// 计算 PMW3360 综合成像质量得分 (0 ~ 100 分)
+uint8_t calculate_pmw3360_quality_score(uint8_t squal, uint16_t shutter,
+                                        uint8_t max_px, uint8_t min_px, uint8_t pixel_sum) {
+    // 1. SQUAL 得分 (满分 40)
+    float s_squal = squal * 0.4f;
+    if (s_squal > 40.0f) s_squal = 40.0f;
+
+    // 2. 对比度得分 (满分 25)
+    int16_t delta = max_px - min_px;
+    float s_contrast = delta * 0.25f;
+    if (s_contrast > 25.0f) s_contrast = 25.0f;
+    if (max_px >= 127) s_contrast -= 3.0f; // 高光过曝惩罚
+    if (min_px == 0)   s_contrast -= 3.0f; // 边缘死黑惩罚
+    if (s_contrast < 0.0f) s_contrast = 0.0f;
+
+    // 3. 曝光均衡得分 (满分 15)
+    float dev = (float)abs((int16_t)pixel_sum - 50);
+    float s_exp = 15.0f - dev * 0.5f;
+    if (s_exp < 0.0f) s_exp = 0.0f;
+
+    // 4. 快门健康得分 (满分 20)
+    float s_shutter = 20.0f;
+    if (shutter < 50) {
+        s_shutter = 20.0f - (50 - shutter) * 0.2f;
+    } else if (shutter > 400) {
+        s_shutter = 20.0f - (shutter - 400) * 0.02f;
+    }
+    if (s_shutter < 0.0f) s_shutter = 0.0f;
+
+    // 综合加总
+    float total = s_squal + s_contrast + s_exp + s_shutter;
+    if (total > 100.0f) total = 100.0f;
+    if (total < 0.0f) total = 0.0f;
+
+    return (uint8_t)(total + 0.5f); // 四舍五入
+}
+
 void housekeeping_task_user(void) {
     /* Sensor diagnostics: sample SQUAL + shutter + pixel stats while the VIA
        toggle is on and the PMW is awake. Runs before the sleep early-return
@@ -627,9 +701,11 @@ void keyboard_post_init_user(void) {
     /* Load up configuration details from the EEPROM user-data block. */
     eeconfig_read_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
     /* An erased/garbage block reads as 0xFFFFFFFF (or a corrupt led_brightness);
-       reseed the board defaults and persist them so the gesture keycode and
-       lighting stay sane. */
-    if (user_config.raw == 0xFFFFFFFFFFFFFFFFULL || user_config.led_brightness > 5) {
+       all-zero means the block was never written (both tap keycodes would be
+       KC_NO and the drag/gesture taps would be dead) -- reseed the board
+       defaults and persist them so the gesture keycode and lighting stay sane. */
+    if (user_config.raw == 0xFFFFFFFFFFFFFFFFULL || user_config.raw == 0 ||
+        user_config.led_brightness > 5) {
         user_config.raw = 0;
         user_config.left_handed = true;
         user_config.horizontal_scroll_arrows = false;
@@ -707,6 +783,24 @@ void keyboard_post_init_user(void) {
         g_sleep_config.enabled = SLEEP_DEFAULT_ENABLED;
         sleep_config_update();
     }
+
+    /* Load the drag-scroll divisors (mouse x/y counts per scroll tick) from
+       the EECONFIG user-data block. The 8-byte tail may be fresh on a layout
+       growth (reads as 0x00, 0xFF -> NaN, or stale bytes): treat any NaN or
+       out-of-range value as uninitialized and reseed the macro defaults so
+       the accumulator can never divide by 0. */
+    eeconfig_read_user_datablock(&g_drag_scroll_config, DRAGSCROLL_EEPROM_OFFSET, sizeof(drag_scroll_config_t));
+    if (isnan(g_drag_scroll_config.h) || isnan(g_drag_scroll_config.v) ||
+        g_drag_scroll_config.h < DRAGSCROLL_R_MIN || g_drag_scroll_config.h > DRAGSCROLL_R_MAX ||
+        g_drag_scroll_config.v < DRAGSCROLL_R_MIN || g_drag_scroll_config.v > DRAGSCROLL_R_MAX ||
+        (g_drag_scroll_config.h == 0.0f && g_drag_scroll_config.v == 0.0f)) {
+        g_drag_scroll_config = (drag_scroll_config_t){
+            .h = PLOOPY_DRAGSCROLL_DIVISOR_H,
+            .v = PLOOPY_DRAGSCROLL_DIVISOR_V,
+        };
+        drag_scroll_config_update();
+    }
+    drag_scroll_apply();
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
@@ -1363,6 +1457,8 @@ enum via_scroll_accel_ids {
     id_scroll_accel_enabled = 6,
     id_scroll_accel_growth_rate = 7,
     id_scroll_accel_drag_scroll_tap_keycode = 8,
+    id_scroll_accel_drag_divisor_h = 9,
+    id_scroll_accel_drag_divisor_v = 10,
 };
 
 /* Separate VIA channel for DPI so it never mixes with the scroll UI. The web
@@ -1405,6 +1501,7 @@ enum via_sensor_ids {
     id_sensor_max      = 4,
     id_sensor_min      = 5,
     id_sensor_pixsum   = 7,
+    id_sensor_quality  = 8,
 };
 
 /* Sampling state (s_sensor_sampling and the sum/count accumulators) is
@@ -1480,12 +1577,29 @@ static void scroll_accel_config_set_value(uint8_t *data) {
             user_config.drag_scroll_tap_keycode = kc;
             break;
         }
+        case id_scroll_accel_drag_divisor_h: {
+            uint16_t v = ((uint16_t)value_data[0] << 8) | value_data[1];
+            if (v < (uint16_t)(DRAGSCROLL_R_MIN * DRAGSCROLL_UI_SCALE)) v = (uint16_t)(DRAGSCROLL_R_MIN * DRAGSCROLL_UI_SCALE);
+            if (v > (uint16_t)(DRAGSCROLL_R_MAX * DRAGSCROLL_UI_SCALE)) v = (uint16_t)(DRAGSCROLL_R_MAX * DRAGSCROLL_UI_SCALE);
+            g_drag_scroll_config.h = (float)v / DRAGSCROLL_UI_SCALE;
+            drag_scroll_apply();
+            break;
+        }
+        case id_scroll_accel_drag_divisor_v: {
+            uint16_t v = ((uint16_t)value_data[0] << 8) | value_data[1];
+            if (v < (uint16_t)(DRAGSCROLL_R_MIN * DRAGSCROLL_UI_SCALE)) v = (uint16_t)(DRAGSCROLL_R_MIN * DRAGSCROLL_UI_SCALE);
+            if (v > (uint16_t)(DRAGSCROLL_R_MAX * DRAGSCROLL_UI_SCALE)) v = (uint16_t)(DRAGSCROLL_R_MAX * DRAGSCROLL_UI_SCALE);
+            g_drag_scroll_config.v = (float)v / DRAGSCROLL_UI_SCALE;
+            drag_scroll_apply();
+            break;
+        }
     }
 
     /* Persist immediately so a value change survives a reboot even if the host
        does not follow up with an explicit id_custom_save. */
     scroll_accel_config_update();
     eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+    drag_scroll_config_update();
 }
 
 static void scroll_accel_config_get_value(uint8_t *data) {
@@ -1540,11 +1654,35 @@ static void scroll_accel_config_get_value(uint8_t *data) {
             value_data[1] = kc & 0xFF;
             break;
         }
+        case id_scroll_accel_drag_divisor_h: {
+            /* 2-byte BE, mirroring the set path (options max 2000 > 255). */
+            uint16_t v = (uint16_t)(g_drag_scroll_config.h * DRAGSCROLL_UI_SCALE);
+            value_data[0] = v >> 8;
+            value_data[1] = v & 0xFF;
+            break;
+        }
+        case id_scroll_accel_drag_divisor_v: {
+            uint16_t v = (uint16_t)(g_drag_scroll_config.v * DRAGSCROLL_UI_SCALE);
+            value_data[0] = v >> 8;
+            value_data[1] = v & 0xFF;
+            break;
+        }
     }
 }
 
 static void scroll_accel_config_update(void) {
     eeconfig_update_user_datablock(&g_scroll_accel_config, SCROLL_ACCEL_EEPROM_OFFSET, sizeof(scroll_accel_config_t));
+}
+
+static void drag_scroll_config_update(void) {
+    eeconfig_update_user_datablock(&g_drag_scroll_config, DRAGSCROLL_EEPROM_OFFSET, sizeof(drag_scroll_config_t));
+}
+
+/* Push the EEPROM copy into the runtime divisors ploopyco.c's drag-scroll
+   accumulator divides by. Called at init and whenever a VIA slider moves. */
+static void drag_scroll_apply(void) {
+    drag_scroll_divisor_h = g_drag_scroll_config.h;
+    drag_scroll_divisor_v = g_drag_scroll_config.v;
 }
 
 static void dpi_apply(void) {
@@ -1666,10 +1804,25 @@ static void sleep_config_get_value(uint8_t *data) {
     }
 }
 
-/* Sensor channel: the sampling toggle is writable; the value controls are
-   read-only and return the session average (sum / count). SQUAL, Max, Min
-   and pixel-sum are 0..255 (1 byte in value_data[0]); shutter is 0..65535
-   (2-byte big-endian in value_data[0..1]), matching aplus.json. */
+/* Sensor channel: the sampling toggle is writable (binary 0/1); every value
+   display is a VIA `label` control, so GET must return a null-terminated
+   ASCII decimal string (e.g. "87") that the web UI decodes as UTF-8.
+   Quality score (0..100) is computed from the session averages via
+   calculate_pmw3360_quality_score(). */
+static void sensor_write_ascii(uint8_t *value_data, uint16_t val) {
+    char    tmp[6];
+    uint8_t n = 0;
+    do {
+        tmp[n++] = '0' + (val % 10);
+        val /= 10;
+    } while (val && n < sizeof(tmp));
+    uint8_t i = 0;
+    while (n) {
+        value_data[i++] = tmp[--n];
+    }
+    value_data[i] = '\0';
+}
+
 static void sensor_config_set_value(uint8_t *data) {
     uint8_t *value_id   = &(data[0]);
     uint8_t *value_data = &(data[1]);
@@ -1690,7 +1843,7 @@ static void sensor_config_set_value(uint8_t *data) {
             s_sensor_sampling = on;
             break;
         }
-        /* Value displays are read-only: ignore UI drags. */
+        /* Label displays are read-only: VIA never SETs them; ignore anyway. */
     }
 }
 
@@ -1699,36 +1852,38 @@ static void sensor_config_get_value(uint8_t *data) {
     uint8_t *value_data = &(data[1]);
 
     switch (*value_id) {
-        case id_sensor_squal: {
-            uint16_t avg = s_sample_count ? (uint16_t)(s_squal_sum / s_sample_count) : 0;
-            value_data[0] = avg;
-            value_data[1] = 0;
+        case id_sensor_quality: {
+            uint16_t avg_squal   = s_sample_count ? (uint16_t)(s_squal_sum / s_sample_count) : 0;
+            uint16_t avg_shutter = s_sample_count ? (uint16_t)(s_shutter_sum / s_sample_count) : 0;
+            uint16_t avg_max     = s_sample_count ? (uint16_t)(s_max_sum / s_sample_count) : 0;
+            uint16_t avg_min     = s_sample_count ? (uint16_t)(s_min_sum / s_sample_count) : 0;
+            uint16_t avg_pixsum  = s_sample_count ? (uint16_t)(s_pixsum_sum / s_sample_count) : 0;
+            uint8_t  score       = calculate_pmw3360_quality_score(
+                (uint8_t)avg_squal, avg_shutter,
+                (uint8_t)avg_max, (uint8_t)avg_min, (uint8_t)avg_pixsum);
+            sensor_write_ascii(value_data, score);
             break;
         }
-        case id_sensor_shutter: {
-            uint16_t avg = s_sample_count ? (uint16_t)(s_shutter_sum / s_sample_count) : 0;
-            value_data[0] = avg >> 8;
-            value_data[1] = avg & 0xFF;
+        case id_sensor_squal:
+            sensor_write_ascii(value_data,
+                               s_sample_count ? (uint16_t)(s_squal_sum / s_sample_count) : 0);
             break;
-        }
-        case id_sensor_max: {
-            uint16_t avg = s_sample_count ? (uint16_t)(s_max_sum / s_sample_count) : 0;
-            value_data[0] = avg;
-            value_data[1] = 0;
+        case id_sensor_shutter:
+            sensor_write_ascii(value_data,
+                               s_sample_count ? (uint16_t)(s_shutter_sum / s_sample_count) : 0);
             break;
-        }
-        case id_sensor_min: {
-            uint16_t avg = s_sample_count ? (uint16_t)(s_min_sum / s_sample_count) : 0;
-            value_data[0] = avg;
-            value_data[1] = 0;
+        case id_sensor_max:
+            sensor_write_ascii(value_data,
+                               s_sample_count ? (uint16_t)(s_max_sum / s_sample_count) : 0);
             break;
-        }
-        case id_sensor_pixsum: {
-            uint16_t avg = s_sample_count ? (uint16_t)(s_pixsum_sum / s_sample_count) : 0;
-            value_data[0] = avg;
-            value_data[1] = 0;
+        case id_sensor_min:
+            sensor_write_ascii(value_data,
+                               s_sample_count ? (uint16_t)(s_min_sum / s_sample_count) : 0);
             break;
-        }
+        case id_sensor_pixsum:
+            sensor_write_ascii(value_data,
+                               s_sample_count ? (uint16_t)(s_pixsum_sum / s_sample_count) : 0);
+            break;
         case id_sensor_sampling:
             value_data[0] = s_sensor_sampling ? 1 : 0;
             value_data[1] = 0;
@@ -1755,6 +1910,7 @@ void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
             case id_custom_save:
                 scroll_accel_config_update();
                 eeconfig_update_user_datablock(&user_config, USER_CONFIG_EEPROM_OFFSET, sizeof(user_config));
+                drag_scroll_config_update();
                 break;
             default:
                 *command_id = id_unhandled;

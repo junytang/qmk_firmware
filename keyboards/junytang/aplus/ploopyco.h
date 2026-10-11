@@ -37,6 +37,13 @@ enum ploopy_keycodes {
 
 bool is_drag_scroll;
 
+/* Runtime drag-scroll divisors. Defaults come from the
+   PLOOPY_DRAGSCROLL_DIVISOR_H/V config macros; the rp2040zero keymap reloads
+   them from EEPROM at boot and lets the VIA "Scroll Tuning" menu retune them
+   live (channel 25, value ids 9/10). */
+extern float drag_scroll_divisor_h;
+extern float drag_scroll_divisor_v;
+
 bool encoder_update_user(uint8_t index, bool clockwise);
 bool encoder_update_kb(uint8_t index, bool clockwise);
 void toggle_drag_scroll(void);

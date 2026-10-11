@@ -69,6 +69,11 @@ bool  is_drag_scroll       = false;
 float scroll_accumulated_h = 0;
 float scroll_accumulated_v = 0;
 
+/* Runtime drag-scroll divisors, seeded from the config macros and overwritten
+   by the rp2040zero keymap's EEPROM copy at boot / by VIA (channel 25). */
+float drag_scroll_divisor_h = PLOOPY_DRAGSCROLL_DIVISOR_H;
+float drag_scroll_divisor_v = PLOOPY_DRAGSCROLL_DIVISOR_V;
+
 #ifdef ENCODER_ENABLE
 uint16_t lastScroll        = 0; // Previous confirmed wheel event
 uint16_t lastMidClick      = 0; // Stops scrollwheel from being read if it was pressed
@@ -141,8 +146,8 @@ void cycle_dpi(void) {
 
 report_mouse_t pointing_device_task_kb(report_mouse_t mouse_report) {
     if (is_drag_scroll) {
-        scroll_accumulated_h += (float)mouse_report.x / PLOOPY_DRAGSCROLL_DIVISOR_H;
-        scroll_accumulated_v += (float)mouse_report.y / PLOOPY_DRAGSCROLL_DIVISOR_V;
+        scroll_accumulated_h += (float)mouse_report.x / drag_scroll_divisor_h;
+        scroll_accumulated_v += (float)mouse_report.y / drag_scroll_divisor_v;
 
         // Assign integer parts of accumulated scroll values to the mouse report
         mouse_report.h = (int8_t)scroll_accumulated_h;

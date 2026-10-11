@@ -25,7 +25,7 @@
  *
  * NOTE: this union is 8 bytes -- the two 16-bit keycodes do not fit in 32 bits
  * alongside the other fields. Growing it shifts the scroll-accel / DPI blocks,
- * so EECONFIG_USER_DATA_SIZE had to be bumped to match. */
+ * so EECONFIG_USER_DATA_SIZE (rp2040zero/config.h) has to be bumped to match. */
 typedef union {
     uint64_t raw;
     struct {
