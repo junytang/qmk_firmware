@@ -119,8 +119,8 @@ typedef struct {
 } sleep_config_t;
 
 /* Drag-scroll divisors: mouse x/y counts consumed per scroll tick. Mirrors
-   PLOOPY_DRAGSCROLL_DIVISOR_H/V but is runtime-tunable (VIA Scroll Tuning)
-   and persisted as the last block of the EECONFIG user datablock. */
+   PLOOPY_DRAGSCROLL_DIVISOR_H/V but is runtime-tunable (VIA DragScroll
+   section) and persisted as the last block of the EECONFIG user datablock. */
 typedef struct {
     float h;
     float v;
@@ -190,7 +190,7 @@ _Static_assert(DRAGSCROLL_EEPROM_OFFSET + sizeof(drag_scroll_config_t) <= EECONF
 #define SCROLL_ACCEL_R_MAX_LIMIT_UPPER 10.0f
 
 /* Drag-scroll divisors (mouse x/y counts per scroll tick). Larger = slower.
-   Exposed in the VIA "Scroll Tuning" menu scaled x10 (0.1..200.0). */
+   Exposed in the VIA "DragScroll" section scaled x10 (0.1..200.0). */
 #define DRAGSCROLL_R_MIN 0.1f
 #define DRAGSCROLL_R_MAX 200.0f
 #define DRAGSCROLL_UI_SCALE 10
@@ -426,6 +426,8 @@ void eeconfig_init_user(void) {
     user_config.horizontal_scroll_arrows = false;   // False = Scroll events, True = left/right arrows.
     user_config.vertical_scroll_arrows = false;     // False = Scroll events, True = up/down arrows.
     user_config.drag_scroll_mode = false;           // Hold to activate.
+    user_config.left_knob_invert = false;           // Knob direction not inverted.
+    user_config.right_knob_invert = false;
     user_config.led_brightness = 1;                 // Dimmest visible level by default (0 = off).
     user_config.gesture_tap_keycode = MS_BTN7;      // Tap of the gesture key.
     user_config.drag_scroll_tap_keycode = MS_BTN8;  // Tap of the drag-scroll key.
@@ -711,6 +713,8 @@ void keyboard_post_init_user(void) {
         user_config.horizontal_scroll_arrows = false;
         user_config.vertical_scroll_arrows = false;
         user_config.drag_scroll_mode = false;
+        user_config.left_knob_invert = false;
+        user_config.right_knob_invert = false;
         user_config.led_brightness = 1;             // Dimmest visible level (0 = off).
         user_config.gesture_tap_keycode = MS_BTN7;
         user_config.drag_scroll_tap_keycode = MS_BTN8;
@@ -1217,6 +1221,20 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         leftwheel_filtered_delta  = (int16_t)(leftwheel_filtered_delta_state  / WHEEL_DELTA_FILTER_SCALE);
         rightwheel_filtered_delta = (int16_t)(rightwheel_filtered_delta_state / WHEEL_DELTA_FILTER_SCALE);
 
+        /* Per-knob direction inversion (VIA "Knobs", default off).
+           Applied here -- on the filtered delta, the single source every
+           consumer reads (normal scroll, arrow modes, Control-layer volume) --
+           so flipping it flips that knob's output consistently. The raw delta
+           and deadzone distance are deliberately untouched: they gate the
+           deadzone / timeout / idle checks, which use abs() and are
+           sign-independent. */
+        if (user_config.left_knob_invert) {
+            leftwheel_filtered_delta = -leftwheel_filtered_delta;
+        }
+        if (user_config.right_knob_invert) {
+            rightwheel_filtered_delta = -rightwheel_filtered_delta;
+        }
+
         /* Wheel/scroll motion holds off auto-sleep, but ONLY on deliberate
            scrolling -- i.e. movement past the deadzone -- NOT on the few-LSB
            angle jitter the TMAG reports while at rest. Gating on the raw delta
@@ -1374,7 +1392,15 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
            wheel->axis mapping is identical for hi-res and low-res OSes; only
            the divisor differs, so the deadzone gate applies uniformly
            (incl. macOS). */
-        bool hi_res = (detected_host_os() == OS_WINDOWS || detected_host_os() == OS_LINUX);
+        /* Default to hi-res: the HID descriptor advertises the resolution
+           multiplier, so 1 notch = POINTING_DEVICE_HIRES_SCROLL_MULTIPLIER
+           (120) units on every host that honours it (Windows, Linux, and
+           anything unknown). Only a *positive* macOS detection falls back to
+           coarse ticks, because macOS ignores the multiplier and treats each
+           unit as one detent (the hi-res divisor would then scroll hundreds
+           of lines per revolution). Anything not identified as macOS --
+           including OS_UNSURE -- keeps the hi-res divisors. */
+        bool hi_res = (detected_host_os() != OS_MACOS);
 
         bool left_is_h  = user_config.left_handed;
         bool right_is_h = !user_config.left_handed;
@@ -1459,6 +1485,8 @@ enum via_scroll_accel_ids {
     id_scroll_accel_drag_scroll_tap_keycode = 8,
     id_scroll_accel_drag_divisor_h = 9,
     id_scroll_accel_drag_divisor_v = 10,
+    id_scroll_accel_knob_invert_left = 11,
+    id_scroll_accel_knob_invert_right = 12,
 };
 
 /* Separate VIA channel for DPI so it never mixes with the scroll UI. The web
@@ -1593,6 +1621,12 @@ static void scroll_accel_config_set_value(uint8_t *data) {
             drag_scroll_apply();
             break;
         }
+        case id_scroll_accel_knob_invert_left:
+            user_config.left_knob_invert = value_data[0] ? true : false;
+            break;
+        case id_scroll_accel_knob_invert_right:
+            user_config.right_knob_invert = value_data[0] ? true : false;
+            break;
     }
 
     /* Persist immediately so a value change survives a reboot even if the host
@@ -1667,6 +1701,14 @@ static void scroll_accel_config_get_value(uint8_t *data) {
             value_data[1] = v & 0xFF;
             break;
         }
+        case id_scroll_accel_knob_invert_left:
+            value_data[0] = user_config.left_knob_invert ? 1 : 0;
+            value_data[1] = 0;
+            break;
+        case id_scroll_accel_knob_invert_right:
+            value_data[0] = user_config.right_knob_invert ? 1 : 0;
+            value_data[1] = 0;
+            break;
     }
 }
 
