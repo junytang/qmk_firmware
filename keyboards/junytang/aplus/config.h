@@ -65,8 +65,8 @@
 #define RGBLIGHT_LAYERS_RETAIN_VAL
 /* On-board lighting is configurable in 4 steps. This variable configures
    the step size in fractions of full brightness (out of 255). */
-#define RGBLIGHT_VAL_STEP 63
-#if RGBLIGHT_VAL_STEP > 63
+#define RGBLIGHT_VAL_STEP 30
+#if RGBLIGHT_VAL_STEP > 30
     #error "RGBLIGHT_VAL_STEP must be less than 64."
 #endif
 
