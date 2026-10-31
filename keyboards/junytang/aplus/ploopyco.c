@@ -212,6 +212,12 @@ bool process_record_kb(uint16_t keycode, keyrecord_t* record) {
 // Hardware Setup
 void keyboard_pre_init_kb(void) {
 
+    /* Let the sensor supply rails settle after power-on before anything talks to
+     * the sensors. This runs before pointing_device_init() (PMW3360, later in
+     * keyboard_init()) and before keyboard_post_init_user() (TMAG5273 wheels),
+     * so both see a stable circuit. */
+    wait_ms(100);
+
     /* Ground all output pins connected to ground. This provides additional
      * pathways to ground. If you're messing with this, know this: driving ANY
      * of these pins high will cause a short. On the MCU. Ka-blooey.

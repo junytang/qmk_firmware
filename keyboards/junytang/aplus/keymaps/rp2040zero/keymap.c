@@ -422,7 +422,7 @@ void eeconfig_init_user(void) {
 
     user_config.raw = 0;
 
-    user_config.left_handed = true;                // Right-handed.
+    user_config.left_handed = false;               // false = right-handed (default); true = lefty nav mode.
     user_config.horizontal_scroll_arrows = false;   // False = Scroll events, True = left/right arrows.
     user_config.vertical_scroll_arrows = false;     // False = Scroll events, True = up/down arrows.
     user_config.drag_scroll_mode = false;           // Hold to activate.
@@ -709,7 +709,7 @@ void keyboard_post_init_user(void) {
     if (user_config.raw == 0xFFFFFFFFFFFFFFFFULL || user_config.raw == 0 ||
         user_config.led_brightness > 5) {
         user_config.raw = 0;
-        user_config.left_handed = true;
+        user_config.left_handed = false;
         user_config.horizontal_scroll_arrows = false;
         user_config.vertical_scroll_arrows = false;
         user_config.drag_scroll_mode = false;
@@ -1156,7 +1156,25 @@ static int32_t rightwheel_filtered_delta_state = 0;
 uint32_t leftwheel_timeout = 0;
 uint32_t rightwheel_timeout = 0;
 
+static float mac_drag_scroll_x_accum = 0.0f;
+static float mac_drag_scroll_y_accum = 0.0f;
+
 report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
+
+    /* Reduce drag-scroll speed on macOS only. */
+    if (is_drag_scroll && detected_host_os() == OS_MACOS) {
+        mac_drag_scroll_x_accum += (float)mouse_report.h / 48.0f;
+        mac_drag_scroll_y_accum += (float)mouse_report.v / 48.0f;
+
+        mouse_report.h = (int8_t)mac_drag_scroll_x_accum;
+        mouse_report.v = (int8_t)mac_drag_scroll_y_accum;
+
+        mac_drag_scroll_x_accum -= (int8_t)mac_drag_scroll_x_accum;
+        mac_drag_scroll_y_accum -= (int8_t)mac_drag_scroll_y_accum;
+    } else {
+        mac_drag_scroll_x_accum = 0.0f;
+        mac_drag_scroll_y_accum = 0.0f;
+    }
 
     /* While awake, any ball or button motion holds off auto-sleep by pushing
        the idle timer forward. This only refreshes the timer; it cannot wake
