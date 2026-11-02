@@ -88,3 +88,7 @@ void cg_rst(tap_dance_state_t *state, void *user_data);
 void ds_press(tap_dance_state_t *state, void *user_data);
 void ds_fin(tap_dance_state_t *state, void *user_data);
 void ds_rst(tap_dance_state_t *state, void *user_data);
+
+/* 导出手势灯光控制函数，使 tap_dance.c 可以调用 keymap.c 里的灯光 */
+void gesture_mode_led_on(void);
+void gesture_mode_led_off(void);

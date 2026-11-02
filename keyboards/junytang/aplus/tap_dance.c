@@ -65,6 +65,7 @@ void cg_fin(tap_dance_state_t *state, void *user_data) {
             break;
         case SINGLE_HOLD:
             pointing_device_gestures_start();
+            gesture_mode_led_on();
             cg_gesture_active = true;
             break;
         case DOUBLE_HOLD:
@@ -85,6 +86,7 @@ void cg_rst(tap_dance_state_t *state, void *user_data) {
     }
     if (cg_gesture_active) {
         pointing_device_gestures_end();
+        gesture_mode_led_off();
         cg_gesture_active = false;
     }
 }

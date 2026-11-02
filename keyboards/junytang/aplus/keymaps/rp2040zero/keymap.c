@@ -40,11 +40,11 @@ uint16_t rightwheel_current_position = 0;
 uint32_t last_scroll_time = 0;
 
 /* Layer lighting, used to blink when making gestures. */
-const rgblight_segment_t PROGMEM righty_nav_layer_colour[] =        RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_NAVBLUE} );
-const rgblight_segment_t PROGMEM lefty_nav_layer_colour[] =         RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_NAVGREEN} );
-const rgblight_segment_t PROGMEM control_layer_colour[] =           RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_RED} );
-const rgblight_segment_t PROGMEM gesture_layer_colour[] =           RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_GESTUREYELLOW} );
-const rgblight_segment_t PROGMEM option_changed_layer_colour[] =    RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_OPTIONCHANGED} );
+rgblight_segment_t righty_nav_layer_colour[] = RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_NAVBLUE} );
+rgblight_segment_t lefty_nav_layer_colour[]  = RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_NAVGREEN} );
+const rgblight_segment_t PROGMEM control_layer_colour[]        = RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_RED} );
+const rgblight_segment_t PROGMEM gesture_layer_colour[]        = RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_GESTUREYELLOW} );
+const rgblight_segment_t PROGMEM option_changed_layer_colour[] = RGBLIGHT_LAYER_SEGMENTS( {0, 2, HSV_OPTIONCHANGED} );
 
 /* Lighting layer definitions. Later layers take precedence, so these
    are defined in the order that they will be displayed in. */
@@ -111,7 +111,7 @@ typedef struct {
    the same guard.
    NOTE: the trailing uint8_t pads the struct to 4 bytes, which puts the end
    of this block at 48. The drag-scroll config is appended after it, and the
-   total lands at exactly EECONFIG_USER_DATA_SIZE (56). If anything grows,
+   total lands at exactly EECONFIG_USER_DATA_SIZE (64). If anything grows,
    bump it in rp2040zero/config.h -- the _Static_assert below fails loudly. */
 typedef struct {
     uint16_t timeout_min;
@@ -129,6 +129,21 @@ typedef struct {
 drag_scroll_config_t g_drag_scroll_config = {
     .h = PLOOPY_DRAGSCROLL_DIVISOR_H,
     .v = PLOOPY_DRAGSCROLL_DIVISOR_V,
+};
+
+/* LED config: 保存左手和右手模式下的指示灯颜色 (Hue & Sat) */
+typedef struct {
+    uint8_t righty_hue;
+    uint8_t righty_sat;
+    uint8_t lefty_hue;
+    uint8_t lefty_sat;
+} led_config_t;
+
+led_config_t g_led_config = {
+    .righty_hue = 180, // 默认 HSV_NAVBLUE 的 Hue
+    .righty_sat = 220,
+    .lefty_hue  = 66,  // 默认 HSV_NAVGREEN 的 Hue
+    .lefty_sat  = 240,
 };
 
 scroll_accel_config_t g_scroll_accel_config = {
@@ -168,6 +183,7 @@ sleep_config_t g_sleep_config = {
 #define DPI_EEPROM_OFFSET (SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t))
 #define SLEEP_EEPROM_OFFSET (DPI_EEPROM_OFFSET + sizeof(dpi_config_t))
 #define DRAGSCROLL_EEPROM_OFFSET (SLEEP_EEPROM_OFFSET + sizeof(sleep_config_t))
+#define LED_CONFIG_EEPROM_OFFSET (DRAGSCROLL_EEPROM_OFFSET + sizeof(drag_scroll_config_t))
 _Static_assert(SCROLL_ACCEL_EEPROM_OFFSET + sizeof(scroll_accel_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 _Static_assert(DPI_EEPROM_OFFSET + sizeof(dpi_config_t) <= EECONFIG_USER_DATA_SIZE,
@@ -176,6 +192,8 @@ _Static_assert(SLEEP_EEPROM_OFFSET + sizeof(sleep_config_t) <= EECONFIG_USER_DAT
                 "user_config + scroll_accel_config + dpi_config + sleep_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 _Static_assert(DRAGSCROLL_EEPROM_OFFSET + sizeof(drag_scroll_config_t) <= EECONFIG_USER_DATA_SIZE,
                 "user_config + scroll_accel_config + dpi_config + sleep_config + drag_scroll_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
+_Static_assert(LED_CONFIG_EEPROM_OFFSET + sizeof(led_config_t) <= EECONFIG_USER_DATA_SIZE,
+                "user_config + ... + led_config exceed EECONFIG_USER_DATA_SIZE; grow it in config.h");
 
 /* Per-param real ranges for VIA projection (must match aplus.json "options"). */
 #define SCROLL_ACCEL_R_MIN_OFFSET 0.0f
@@ -205,6 +223,9 @@ static void sleep_config_get_value(uint8_t *data);
 static void drag_scroll_config_update(void);
 static void drag_scroll_apply(void);
 
+static void led_config_update(void);
+static void led_config_apply(void);
+
 static void dpi_apply(void);
 static void dpi_config_update(void);
 static void dpi_config_set_value(uint8_t *data);
@@ -229,10 +250,45 @@ enum my_keycodes {
 //     LAYER_CONTROL
 // };
 
+/* ==========================================================================
+ * 手势方向与 via.json 虚拟矩阵 (Row 1) 列号的映射转换表:
+ * Ploopy 官方手势方向定义 (0~7 从正东顺时针):
+ *   0: East (正东/右 →)       -> via.json 列号 3 (1,3)
+ *   1: South-East (东南/右下 ↘) -> via.json 列号 4 (1,4)
+ *   2: South (正南/下 ↓)       -> via.json 列号 5 (1,5)
+ *   3: South-West (西南/左下 ↙) -> via.json 列号 6 (1,6)
+ *   4: West (正西/左 ←)       -> via.json 列号 7 (1,7)
+ *   5: North-West (西北/左上 ↖) -> via.json 列号 0 (1,0)
+ *   6: North (正北/上 ↑)       -> via.json 列号 1 (1,1)
+ *   7: North-East (东北/右上 ↗) -> via.json 列号 2 (1,2)
+ * ========================================================================== */
+#define GESTURE_MATRIX_ROW 1
+static const uint8_t PROGMEM gesture_dir_to_matrix_col[8] = { 3, 4, 5, 6, 7, 0, 1, 2 };
+
 /* Override default function in submodule code so that we can blink whenever
    a successful gesture is registered. */
 void pointing_device_gestures_trigger(uint8_t direction) {
 
+    /* 优先读取 VIA 网页中为该手势配置的动态按键 */
+    if (direction < 8) {
+        uint8_t col = pgm_read_byte(&gesture_dir_to_matrix_col[direction]);
+        uint8_t layer = get_highest_layer(layer_state);
+        uint16_t mapped_kc = dynamic_keymap_get_keycode(layer, GESTURE_MATRIX_ROW, col);
+
+        // 如果当前层是透明键 (KC_TRNS)，尝试回退检查第 0 基础层
+        if (mapped_kc == KC_TRNS) {
+            mapped_kc = dynamic_keymap_get_keycode(0, GESTURE_MATRIX_ROW, col);
+        }
+
+        // 如果 VIA 填写了有效按键 (既不是 KC_NO 也不是 KC_TRNS)
+        if (mapped_kc != KC_NO && mapped_kc != KC_TRNS) {
+            tap_code16(mapped_kc); // 触发 VIA 中设定的自定义按键/快捷键
+            rgblight_blink_layer(OPTION_CHANGED_LAYER_COLOUR, OPTION_CHANGE_BLINK_TIMEOUT * 2);
+            return; // 成功执行，直接退出，不再走后面的默认逻辑
+        }
+    }
+
+    /* 如果 VIA 没有配置任何按键，回退执行以下原生逻辑 */
     /* Directions are numbered off 0-7, starting with east. */
     switch( direction ) {
         case 0: /* East, Next Virtual Desktop. */
@@ -327,29 +383,53 @@ void pointing_device_gestures_trigger(uint8_t direction) {
 const uint16_t PROGMEM pointing_device_gestures[NUM_GESTURE_DIRECTIONS] =
     GESTURES_CARDINAL_AND_ORDINAL_DIRECTIONS( KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO );
 
-    /* Keymap. */
-    const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
-        // Base layer with all of the mouse-related stuff for everyday use.
-        [LAYER_NAV_RIGHT_HANDED] = LAYOUT(  MS_BTN6, MS_BTN5, TD(TD_DRAG_SCROLL), MS_BTN4,
-                                        MS_BTN1, MS_BTN3,
-                                        MS_BTN2, TD(TD_CONTROL_GESTURE) ),
-        // Mirror-image of right-handed layout for lefties.
-        [LAYER_NAV_LEFT_HANDED] = LAYOUT(   LT(3, MS_BTN4), TD(TD_DRAG_SCROLL), MS_BTN5, MS_BTN6,
-                                        MS_BTN3, MS_BTN1,
-                                        TD(TD_CONTROL_GESTURE), MS_BTN2 ),
-    // (TD_CONTROL_GESTURE: tap = gesture_tap_keycode (MS_BTN7 default),
-    //  hold = pointing-device gesture, tap+hold = MO(LAYER_CONTROL).
-    //  TD_DRAG_SCROLL: tap = drag_scroll_tap_keycode (MS_BTN8 default),
-    //  hold = drag scroll -- it replaces the old PKC_DRAG_SCROLL key.)
-    // Layer for all of the customization options.
-    [LAYER_CONTROL] = LAYOUT(           PKC_BLINKY_DPI_CONFIG, PKC_ADJUST_LED_BRIGHTNESS, PKC_TGL_VERT_SCRL, PKC_TGL_HORIZ_SCRL,
-                                        PKC_TGL_MIRROR, PKC_TGL_DRAG_SCRL,
-                                        MO(LAYER_CONTROL), MO(LAYER_CONTROL) ),
-    [3] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
-    [4] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
-    [5] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
-    [6] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ ),
-    [7] = LAYOUT( _______, _______, _______, _______, _______, _______, _______, _______ )
+const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
+    [LAYER_NAV_RIGHT_HANDED] = LAYOUT_16(
+        /* 第 0 行：8 个物理键 */
+        MS_BTN6, MS_BTN5,                   TD(TD_DRAG_SCROLL), MS_BTN4,
+        MS_BTN1, MS_BTN3,
+        MS_BTN2, TD(TD_CONTROL_GESTURE),
+        /* 第 1 行：8 个手势默认键 (默认全为 KC_NO) */
+        KC_NO,   KC_NO,                     KC_NO,              KC_NO,
+        KC_NO,   KC_NO,                     KC_NO,              KC_NO
+    ),
+
+    [LAYER_NAV_LEFT_HANDED] = LAYOUT_16(
+        LT(3, MS_BTN4),         TD(TD_DRAG_SCROLL), MS_BTN5, MS_BTN6,
+        MS_BTN3,                MS_BTN1,
+        TD(TD_CONTROL_GESTURE), MS_BTN2,
+        KC_NO,                  KC_NO,              KC_NO,   KC_NO,
+        KC_NO,                  KC_NO,              KC_NO,   KC_NO
+    ),
+
+    [LAYER_CONTROL] = LAYOUT_16(
+        PKC_BLINKY_DPI_CONFIG, PKC_ADJUST_LED_BRIGHTNESS, PKC_TGL_VERT_SCRL, PKC_TGL_HORIZ_SCRL,
+        PKC_TGL_MIRROR,        PKC_TGL_DRAG_SCRL,
+        MO(LAYER_CONTROL),     MO(LAYER_CONTROL),
+        KC_NO,                 KC_NO,                     KC_NO,              KC_NO,
+        KC_NO,                 KC_NO,                     KC_NO,              KC_NO
+    ),
+
+    [3] = LAYOUT_16(
+        _______, _______, _______, _______, _______, _______, _______, _______,
+        _______, _______, _______, _______, _______, _______, _______, _______
+    ),
+    [4] = LAYOUT_16(
+        _______, _______, _______, _______, _______, _______, _______, _______,
+        _______, _______, _______, _______, _______, _______, _______, _______
+    ),
+    [5] = LAYOUT_16(
+        _______, _______, _______, _______, _______, _______, _______, _______,
+        _______, _______, _______, _______, _______, _______, _______, _______
+    ),
+    [6] = LAYOUT_16(
+        _______, _______, _______, _______, _______, _______, _______, _______,
+        _______, _______, _______, _______, _______, _______, _______, _______
+    ),
+    [7] = LAYOUT_16(
+        _______, _______, _______, _______, _______, _______, _______, _______,
+        _______, _______, _______, _______, _______, _______, _______, _______
+    )
 };
 
 /* 3-in-1 control/gesture key (TD_CONTROL_GESTURE), defined in tap_dance.c:
@@ -471,6 +551,16 @@ void eeconfig_init_user(void) {
     };
     drag_scroll_config_update();
     drag_scroll_apply();
+
+    /* Seed led color config */
+    g_led_config = (led_config_t){
+        .righty_hue = 180,
+        .righty_sat = 220,
+        .lefty_hue  = 66,
+        .lefty_sat  = 240,
+    };
+    led_config_update();
+    led_config_apply();
 }
 
 void keyboard_pre_init_user(void) {
@@ -805,6 +895,20 @@ void keyboard_post_init_user(void) {
         drag_scroll_config_update();
     }
     drag_scroll_apply();
+
+    /* 加载自定义 LED 配色 */
+    eeconfig_read_user_datablock(&g_led_config, LED_CONFIG_EEPROM_OFFSET, sizeof(led_config_t));
+    if (g_led_config.righty_sat == 0 && g_led_config.lefty_sat == 0 &&
+        g_led_config.righty_hue == 0 && g_led_config.lefty_hue == 0) {
+        g_led_config = (led_config_t){
+            .righty_hue = 152,
+            .righty_sat = 255,
+            .lefty_hue  = 85,
+            .lefty_sat  = 255,
+        };
+        led_config_update();
+    }
+    led_config_apply();
 
     /* Set the startup layer based on handed-ness. */
     if( user_config.left_handed ) {
@@ -1745,6 +1849,79 @@ static void drag_scroll_apply(void) {
     drag_scroll_divisor_v = g_drag_scroll_config.v;
 }
 
+/* 将配置应用到 RAM 中的灯光段，并立即刷新物理灯光 */
+static void led_config_apply(void) {
+    righty_nav_layer_colour[0].hue = g_led_config.righty_hue;
+    righty_nav_layer_colour[0].sat = g_led_config.righty_sat;
+    lefty_nav_layer_colour[0].hue  = g_led_config.lefty_hue;
+    lefty_nav_layer_colour[0].sat  = g_led_config.lefty_sat;
+
+    /* 立即重新激活当前最高层的灯光，实现拖动滑块秒变色 */
+    layer_state_set_user(layer_state);
+}
+
+static void led_config_update(void) {
+    eeconfig_update_user_datablock(&g_led_config, LED_CONFIG_EEPROM_OFFSET, sizeof(led_config_t));
+}
+
+enum via_led_channel {
+    id_led = 29,
+};
+
+enum via_led_ids {
+    id_led_righty_hue = 1,
+    id_led_righty_sat = 2,
+    id_led_lefty_hue  = 3,
+    id_led_lefty_sat  = 4,
+};
+
+static void led_config_set_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_led_righty_hue:
+            g_led_config.righty_hue = value_data[0];
+            break;
+        case id_led_righty_sat:
+            g_led_config.righty_sat = value_data[0];
+            break;
+        case id_led_lefty_hue:
+            g_led_config.lefty_hue = value_data[0];
+            break;
+        case id_led_lefty_sat:
+            g_led_config.lefty_sat = value_data[0];
+            break;
+    }
+
+    led_config_apply();
+    led_config_update();
+}
+
+static void led_config_get_value(uint8_t *data) {
+    uint8_t *value_id = &(data[0]);
+    uint8_t *value_data = &(data[1]);
+
+    switch (*value_id) {
+        case id_led_righty_hue:
+            value_data[0] = g_led_config.righty_hue;
+            value_data[1] = 0;
+            break;
+        case id_led_righty_sat:
+            value_data[0] = g_led_config.righty_sat;
+            value_data[1] = 0;
+            break;
+        case id_led_lefty_hue:
+            value_data[0] = g_led_config.lefty_hue;
+            value_data[1] = 0;
+            break;
+        case id_led_lefty_sat:
+            value_data[0] = g_led_config.lefty_sat;
+            value_data[1] = 0;
+            break;
+    }
+}
+
 static void dpi_apply(void) {
     if (g_dpi_config.active_preset >= 5) g_dpi_config.active_preset = 0;
     pointing_device_set_cpi(g_dpi_config.presets[g_dpi_config.active_preset]);
@@ -1958,6 +2135,24 @@ void via_custom_value_command_kb(uint8_t *data, uint8_t length) {
     uint8_t *command_id = &(data[0]);
     uint8_t *channel_id = &(data[1]);
     uint8_t *value_and_data = &(data[2]);
+
+    if (*channel_id == id_led) {
+        switch (*command_id) {
+            case id_custom_set_value:
+                led_config_set_value(value_and_data);
+                break;
+            case id_custom_get_value:
+                led_config_get_value(value_and_data);
+                break;
+            case id_custom_save:
+                led_config_update();
+                break;
+            default:
+                *command_id = id_unhandled;
+                break;
+        }
+        return;
+    }
 
     if (*channel_id == id_scroll_accel) {
         switch (*command_id) {

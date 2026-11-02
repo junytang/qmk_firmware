@@ -52,35 +52,34 @@
 /* user_config (gesture keycode + board settings, 8 bytes), the scroll-accel
    config (1 bool + 5 floats, 24 bytes with padding), the DPI config
    (5x uint16 presets + uint8 active preset = 12 bytes with padding), the
-   auto-sleep config (uint16 minutes + uint8 enabled = 4 bytes with padding)
-   and the drag-scroll config (2 floats, 8 bytes) are all persisted in the
-   EECONFIG user-data block via eeconfig_read_user_datablock /
-   eeconfig_update_user_datablock in keymap.c, following the pattern in
-   users/junytang/ploopy_via.c. This keeps them out of the VIA custom-config
-   EEPROM region, which the drashna/pointing_device_accel module (enabled in
-   keymap.json) owns for its cursor-accel data -- so we deliberately do NOT
-   redefine VIA_EEPROM_CUSTOM_CONFIG_SIZE, avoiding that module's
-   "already defined" #error / per-build-unit #pragma message.
-   Layout: user_config at offset 0 (8B), scroll config at offset 8 (24B),
-   DPI config at offset 32 (12B), sleep config at offset 44 (4B), drag-scroll
-   config at offset 48 (8B) => 56B used.
-   This must be >= 56 (exactly full now -- grow it if any struct grows).
-   The static asserts in keymap.c fail loudly if this ever needs raising. */
-/* Reserved space for the persistent user blocks in keymap.c:
- *   user_config_t (8, grown to hold both configurable tap keycodes)
- * + scroll_accel_config_t (24) + dpi_config_t (12) + sleep_config_t (4)
- * + drag_scroll_config_t (8) = 56.
- * Bumped 40 -> 48 when user_config_t grew; 48 -> 56 when drag_scroll_config_t
- * was appended. */
-#define EECONFIG_USER_DATA_SIZE 56
+   auto-sleep config (uint16 minutes + uint8 enabled = 4 bytes with padding),
+   the drag-scroll config (2 floats, 8 bytes) and the custom LED config
+   (righty/lefty hue & sat, 4 bytes) are all persisted in the EECONFIG
+   user-data block via eeconfig_read_user_datablock / eeconfig_update_user_datablock
+   in keymap.c, following the pattern in users/junytang/ploopy_via.c.
 
-/* Pin the datablock version to the OLD size (48) so the append-only 48 -> 56
+   Layout:
+     user_config at offset 0 (8B)
+   + scroll config at offset 8 (24B)
+   + DPI config at offset 32 (12B)
+   + sleep config at offset 44 (4B)
+   + drag-scroll config at offset 48 (8B)
+   + led config at offset 56 (4B)
+   => 60B used total.
+
+   Bumped 40 -> 48 when user_config_t grew;
+   48 -> 56 when drag_scroll_config_t was appended;
+   56 -> 64 when led_config_t was appended (aligned to 64B with 4B headroom).
+   The static asserts in keymap.c fail loudly if this ever needs raising. */
+#define EECONFIG_USER_DATA_SIZE 64
+
+/* Pin the datablock version to the OLD size (48) so the append-only 48 -> 56 -> 64
    growth does not invalidate the block. nvm_eeconfig treats a version
    mismatch as "wipe the whole datablock", which would reseed every guard and
    throw away the user's tuned scroll/DPI/sleep values; keeping the version
    at 48 means the first 48 bytes keep their exact old meaning and only the
-   fresh 8-byte tail reads as garbage (caught by the drag-scroll guard in
-   keyboard_post_init_user, which reseeds just that struct).
+   fresh tail reads as uninitialized (caught by the respective guards in
+   keyboard_post_init_user, which reseed just the new structs).
    Bump this only if an EXISTING struct is reordered/resized -- appending new
    structs at the end must leave it alone. */
 #define EECONFIG_USER_DATA_VERSION 48
