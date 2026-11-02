@@ -265,6 +265,22 @@ enum my_keycodes {
 #define GESTURE_MATRIX_ROW 1
 static const uint8_t PROGMEM gesture_dir_to_matrix_col[8] = { 3, 4, 5, 6, 7, 0, 1, 2 };
 
+/* Send a VIA-configured gesture action. A keycode in the QK_MACRO range must
+   run the matching VIA dynamic macro; tap_code16() only emits HID keys and
+   would do nothing for M0-M15. */
+static void gesture_send_configured(uint16_t keycode) {
+#ifdef DYNAMIC_KEYMAP_ENABLE
+    if (keycode >= QK_MACRO && keycode <= QK_MACRO_MAX) {
+        uint8_t id = (uint8_t)(keycode - QK_MACRO);
+        if (id < DYNAMIC_KEYMAP_MACRO_COUNT) {
+            dynamic_keymap_macro_send(id);
+        }
+        return;
+    }
+#endif
+    tap_code16(keycode);
+}
+
 /* Override default function in submodule code so that we can blink whenever
    a successful gesture is registered. */
 void pointing_device_gestures_trigger(uint8_t direction) {
@@ -275,14 +291,16 @@ void pointing_device_gestures_trigger(uint8_t direction) {
         uint8_t layer = get_highest_layer(layer_state);
         uint16_t mapped_kc = dynamic_keymap_get_keycode(layer, GESTURE_MATRIX_ROW, col);
 
-        // 如果当前层是透明键 (KC_TRNS)，尝试回退检查第 0 基础层
-        if (mapped_kc == KC_TRNS) {
+        /* 高层的虚拟手势键通常没有填写（KC_NO）或为透明键（KC_TRNS）；
+           两者都应回退到第 0 基础层。只判断 KC_TRNS 会让左/右手层
+           （LAYER_NAV_* 常驻）把基础层的设置遮住。 */
+        if (mapped_kc == KC_NO || mapped_kc == KC_TRNS) {
             mapped_kc = dynamic_keymap_get_keycode(0, GESTURE_MATRIX_ROW, col);
         }
 
         // 如果 VIA 填写了有效按键 (既不是 KC_NO 也不是 KC_TRNS)
         if (mapped_kc != KC_NO && mapped_kc != KC_TRNS) {
-            tap_code16(mapped_kc); // 触发 VIA 中设定的自定义按键/快捷键
+            gesture_send_configured(mapped_kc); // 触发 VIA 中设定的按键/快捷键/宏
             rgblight_blink_layer(OPTION_CHANGED_LAYER_COLOUR, OPTION_CHANGE_BLINK_TIMEOUT * 2);
             return; // 成功执行，直接退出，不再走后面的默认逻辑
         }
@@ -1257,6 +1275,19 @@ static int16_t rightwheel_filtered_delta = 0;
 static int32_t leftwheel_filtered_delta_state  = 0;
 static int32_t rightwheel_filtered_delta_state = 0;
 
+/* Below this magnitude the filtered per-poll delta is treated as sensor /
+   mechanical noise and forced to zero. 2 angle LSB is 0.125 degrees; the
+   TMAG5273 angle quantisation/noise floor plus the wheel's tiny settling
+   wobble is in that range. This matters especially on Windows: the hi-res
+   path uses a divisor of 2, so a single leftover LSB would otherwise feed
+   the Bresenham accumulator and eventually emit a 1/120-notch scroll event.
+   The old per-poll integer division by 2 discarded these values; the
+   accumulator did not, which is why random micro-scrolls appeared. Real
+   slow scrolling settles above this gate once the low-pass filter ramps. */
+#ifndef WHEEL_DELTA_NOISE_GATE
+#    define WHEEL_DELTA_NOISE_GATE 2
+#endif
+
 uint32_t leftwheel_timeout = 0;
 uint32_t rightwheel_timeout = 0;
 
@@ -1305,6 +1336,16 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         uint16_t leftwheel_rawangle = tmag5273_get_angle(TMAG5273_D0_I2C_ADDRESS);
         uint16_t rightwheel_rawangle = tmag5273_get_angle(TMAG5273_D1_I2C_ADDRESS);
 
+        /* Default to hi-res: the HID descriptor advertises the resolution
+           multiplier, so 1 notch = POINTING_DEVICE_HIRES_SCROLL_MULTIPLIER
+           (120) units on every host that honours it (Windows, Linux, and
+           anything unknown). Only a *positive* macOS detection falls back to
+           coarse ticks, because macOS ignores the multiplier and treats each
+           unit as one detent (the hi-res divisor would then scroll hundreds
+           of lines per revolution). Anything not identified as macOS --
+           including OS_UNSURE -- keeps the hi-res divisors. */
+        bool hi_res = (detected_host_os() != OS_MACOS);
+
         /* First poll after waking: the stored wheel positions are stale because
            we were not polling, so re-baseline them against where the wheels are
            now (discarding anything that moved while asleep) and drop this
@@ -1335,13 +1376,28 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         rightwheel_current_position = rightwheel_rawangle;
 
         /* Low-pass filter the deltas to smooth quantisation noise at slow
-           scroll speeds. Raw deltas are still used for the idle-timeout check. */
+           scroll speeds. The gated filtered delta is also what the idle-timeout
+           check below uses. */
         leftwheel_filtered_delta_state  = (WHEEL_DELTA_FILTER_ALPHA_NUM * (int32_t)leftwheel_delta  * WHEEL_DELTA_FILTER_SCALE +
                                           (WHEEL_DELTA_FILTER_ALPHA_DEN - WHEEL_DELTA_FILTER_ALPHA_NUM) * leftwheel_filtered_delta_state)  / WHEEL_DELTA_FILTER_ALPHA_DEN;
         rightwheel_filtered_delta_state = (WHEEL_DELTA_FILTER_ALPHA_NUM * (int32_t)rightwheel_delta * WHEEL_DELTA_FILTER_SCALE +
                                           (WHEEL_DELTA_FILTER_ALPHA_DEN - WHEEL_DELTA_FILTER_ALPHA_NUM) * rightwheel_filtered_delta_state) / WHEEL_DELTA_FILTER_ALPHA_DEN;
         leftwheel_filtered_delta  = (int16_t)(leftwheel_filtered_delta_state  / WHEEL_DELTA_FILTER_SCALE);
         rightwheel_filtered_delta = (int16_t)(rightwheel_filtered_delta_state / WHEEL_DELTA_FILTER_SCALE);
+
+        /* Kill sub-LSB noise before it reaches any consumer (scroll, volume,
+           arrow modes). Without this the accumulator turns idle sensor jitter
+           into occasional +/-1 hires scroll counts, which Windows renders as
+           visible random small up/down scrolling. Only needed on hi-res hosts;
+           see the hi_res comment above. */
+        if (hi_res) {
+            if (abs(leftwheel_filtered_delta) < WHEEL_DELTA_NOISE_GATE) {
+                leftwheel_filtered_delta = 0;
+            }
+            if (abs(rightwheel_filtered_delta) < WHEEL_DELTA_NOISE_GATE) {
+                rightwheel_filtered_delta = 0;
+            }
+        }
 
         /* Per-knob direction inversion (VIA "Knobs", default off).
            Applied here -- on the filtered delta, the single source every
@@ -1368,8 +1424,10 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         }
 
         /* If either wheel moved, we reset the timeout counter. Else, we start
-           counting inactivity. */
-        if( abs(leftwheel_delta) > 2 ) {
+           counting inactivity. Use the gated filtered delta, not the raw one:
+           raw sensor jitter above 2 LSB used to reset this timeout forever, so
+           the deadzone center never re-latched and the gate stayed open. */
+        if( leftwheel_filtered_delta != 0 ) {
             leftwheel_timeout = 0;
         }
         else {
@@ -1378,7 +1436,7 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
                 leftwheel_timeout += timer_elapsed32(last_scroll_time);
             }
         }
-        if( abs(rightwheel_delta) > 2 ) {
+        if( rightwheel_filtered_delta != 0 ) {
             rightwheel_timeout = 0;
         }
         else {
@@ -1514,16 +1572,6 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
            wheel->axis mapping is identical for hi-res and low-res OSes; only
            the divisor differs, so the deadzone gate applies uniformly
            (incl. macOS). */
-        /* Default to hi-res: the HID descriptor advertises the resolution
-           multiplier, so 1 notch = POINTING_DEVICE_HIRES_SCROLL_MULTIPLIER
-           (120) units on every host that honours it (Windows, Linux, and
-           anything unknown). Only a *positive* macOS detection falls back to
-           coarse ticks, because macOS ignores the multiplier and treats each
-           unit as one detent (the hi-res divisor would then scroll hundreds
-           of lines per revolution). Anything not identified as macOS --
-           including OS_UNSURE -- keeps the hi-res divisors. */
-        bool hi_res = (detected_host_os() != OS_MACOS);
-
         bool left_is_h  = user_config.left_handed;
         bool right_is_h = !user_config.left_handed;
 
